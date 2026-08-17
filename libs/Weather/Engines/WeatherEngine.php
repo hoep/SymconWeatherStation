@@ -107,8 +107,14 @@ final class WeatherEngine
      * vor 2 Minuten". Erst der Ringspeicher macht Entfernung UND Haeufigkeit auswertbar, und
      * erst damit ist die Meldung eine Aussage ueber die Lage statt ueber ein Ereignis.
      *
+     * Zusaetzlich wird der ZUG der Zelle bestimmt: eine Ausgleichsgerade durch die Entfernungen
+     * der letzten Schlaege ueber der Zeit. Sinkt sie, zieht das Gewitter auf, und aus der
+     * Steigung fallen Zuggeschwindigkeit und ungefaehre Ankunft ab. Das ist die Angabe, die
+     * zaehlt — "Blitz in 27 km" sagt nicht, ob man Fenster schliessen oder weiterarbeiten soll.
+     *
      * @param array<int,array{t:int,d:float}> $ring bisheriger Speicher
-     * @return array{stufe:int,dist:int,rate:int,last:int,text:string,ring:array}
+     * @return array{stufe:int,dist:int,rate:int,last:int,text:string,ring:array,
+     *               trend:int,speed:float|null,eta:int|null}
      */
     public static function gewitter(Observation $o, array $ring, array $cfg = [], ?int $jetzt = null): array
     {
@@ -150,15 +156,103 @@ final class WeatherEngine
             $stufe = self::GEW_LEUCHTEN;
         }
 
+        $zug = self::zug($ring, $nun);
+
         $text = 'kein Gewitter';
         if ($stufe > 0) {
             $text = ['', 'Wetterleuchten', 'Gewitter', 'Gewitter in der Nähe'][$stufe]
                   . ($dl !== null ? sprintf(', letzter Blitz %.0f km', $dl) : '')
                   . sprintf(' vor %d min', max(0, (int) round(($nun - $last) / 60)))
                   . ($rate > 1 ? sprintf(', %d Blitze in 30 min', $rate) : '');
+            if ($zug['trend'] < 0) {
+                $text .= sprintf(' — zieht auf mit %.0f km/h', $zug['speed']);
+                if ($zug['eta'] !== null) {
+                    $text .= sprintf(', hier in etwa %d min', $zug['eta']);
+                }
+            } elseif ($zug['trend'] > 0) {
+                $text .= sprintf(' — zieht ab mit %.0f km/h', $zug['speed']);
+            }
         }
         return ['stufe' => $stufe, 'dist' => $dl === null ? 0 : (int) round($dl),
-                'rate' => $rate, 'last' => $last, 'text' => $text, 'ring' => $ring];
+                'rate' => $rate, 'last' => $last, 'text' => $text, 'ring' => $ring,
+                'trend' => $zug['trend'], 'speed' => $zug['speed'], 'eta' => $zug['eta']];
+    }
+
+    /**
+     * Zug der Gewitterzelle aus den Entfernungen der letzten Schlaege.
+     *
+     * Ausgleichsgerade (kleinste Quadrate) der Entfernung ueber der Zeit. Die Steigung ist die
+     * Zuggeschwindigkeit: negativ heisst naeher kommend. Bewusst erst ab vier Schlaegen und
+     * einer Spanne von fuenf Minuten — aus zwei Blitzen laesst sich keine Zugrichtung ablesen,
+     * und eine erfundene Ankunftszeit waere schlimmer als gar keine.
+     *
+     * Die Entfernungsangabe der Station ist grob gestuft; deshalb gilt erst ab etwa 8 km/h ein
+     * Zug als erkannt, darunter heisst es "steht".
+     *
+     * @param array<int,array{t:int,d:float}> $ring
+     * @return array{trend:int,speed:float|null,eta:int|null}
+     */
+    private static function zug(array $ring, int $nun): array
+    {
+        $p = array_values(array_filter($ring, static fn($e) => ($nun - (int) $e['t']) <= 2700));
+        if (count($p) < 4) {
+            return ['trend' => 0, 'speed' => null, 'eta' => null];
+        }
+
+        // Blitze EINER Zelle streuen stark: sie schlagen am nahen wie am fernen Rand ein, bei
+        // einer 15 km grossen Zelle also ueber 15 km Spanne. Eine Ausgleichsgerade durch alle
+        // Einzelwerte folgt dieser Streuung statt der Zugbewegung und liefert Phantasiewerte
+        // (im Betrieb gemessen: 118 km/h fuer eine Zelle, die tatsaechlich mit etwa 50 km/h zog).
+        // Deshalb erst je Fuenf-Minuten-Fenster den MEDIAN bilden und dann die Gerade durch die
+        // Fenster legen — der Median ist gegen Ausreisser an beiden Raendern unempfindlich.
+        $fenster = [];
+        foreach ($p as $e) {
+            $k = (int) floor((int) $e['t'] / 300);
+            $fenster[$k][] = (float) $e['d'];
+        }
+        ksort($fenster);
+        $punkte = [];
+        foreach ($fenster as $k => $werte) {
+            sort($werte);
+            $n = count($werte);
+            $punkte[] = ['t' => $k * 300 + 150,
+                         'd' => $n % 2 ? $werte[intdiv($n, 2)]
+                                       : ($werte[$n / 2 - 1] + $werte[$n / 2]) / 2];
+        }
+        $n = count($punkte);
+        if ($n < 3) {
+            return ['trend' => 0, 'speed' => null, 'eta' => null];
+        }
+
+        $t0 = (int) $punkte[0]['t'];
+        $sx = $sy = $sxy = $sxx = 0.0;
+        foreach ($punkte as $e) {
+            $x = ((int) $e['t'] - $t0) / 60.0;
+            $y = (float) $e['d'];
+            $sx += $x; $sy += $y; $sxy += $x * $y; $sxx += $x * $x;
+        }
+        $nenner = $n * $sxx - $sx * $sx;
+        if (abs($nenner) < 1e-9) {
+            return ['trend' => 0, 'speed' => null, 'eta' => null];
+        }
+        $steig = ($n * $sxy - $sx * $sy) / $nenner;              // km je Minute
+        $kmh   = abs($steig) * 60.0;
+
+        // Ueber 90 km/h zieht keine Gewitterzelle. So ein Wert heisst nicht "sehr schnell",
+        // sondern "die Daten geben keine Zugbewegung her" — dann lieber nichts behaupten.
+        if ($kmh > 90.0) {
+            return ['trend' => 0, 'speed' => null, 'eta' => null];
+        }
+        if ($kmh < 8.0) {
+            return ['trend' => 0, 'speed' => round($kmh, 1), 'eta' => null];
+        }
+        if ($steig >= 0) {
+            return ['trend' => 1, 'speed' => round($kmh, 1), 'eta' => null];
+        }
+        $dNun = (float) $punkte[$n - 1]['d'];
+        $eta  = (int) round($dNun / abs($steig));
+        return ['trend' => -1, 'speed' => round($kmh, 1),
+                'eta' => ($eta > 0 && $eta <= 180) ? $eta : null];
     }
 
     /**

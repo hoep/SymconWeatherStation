@@ -28,9 +28,11 @@ class WeatherStation extends IPSModule
     private const GUID_SOURCE = '{B24C7F1E-9A05-4E63-8D17-3F92C6B0A5D8}';
 
     /** Variablen, die als Messreihe etwas taugen — nur die werden archiviert. */
-    private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'Wind', 'WindAvg', 'Gust', 'Pressure',
-                            'RainRate', 'RainDay', 'Radiation', 'UV', 'CloudPct', 'FogLevel',
-                            'FogFSI', 'StormLevel', 'SightPct'];
+    private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'Wind', 'WindAvg', 'Gust', 'WindDir',
+                            'Pressure', 'RainRate', 'RainDay', 'Radiation', 'UV', 'CloudPct',
+                            'FogLevel', 'FogPct', 'FogFSI', 'PrecipType', 'StormLevel', 'StormDist',
+                            'StormRate', 'StormTrend', 'StormSpeed', 'StormApproaching',
+                            'SightPct', 'SnowCover', 'Condition'];
 
     public function Create()
     {
@@ -81,7 +83,11 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableInteger('StormDist', 'Gewitter · Entfernung', '', 36);
         $this->RegisterVariableInteger('StormRate', 'Gewitter · Blitze (30 min)', '', 37);
         $this->RegisterVariableInteger('StormLast', 'Gewitter · letzter Blitz', '~UnixTimestamp', 38);
-        $this->RegisterVariableString('StormText', 'Gewitter · Klartext', '', 39);
+        $this->RegisterVariableInteger('StormTrend', 'Gewitter · Zug', 'WX.Zug', 39);
+        $this->RegisterVariableFloat('StormSpeed', 'Gewitter · Zuggeschwindigkeit', $this->prof('~WindSpeed.kmh'), 40);
+        $this->RegisterVariableInteger('StormEta', 'Gewitter · hier in etwa (min)', '', 41);
+        $this->RegisterVariableBoolean('StormApproaching', 'Gewitter zieht auf', $this->prof('~Alert'), 42);
+        $this->RegisterVariableString('StormText', 'Gewitter · Klartext', '', 43);
         $this->RegisterVariableFloat('CloudPct', 'Bewölkung', '~Intensity.100', 40);
         $this->RegisterVariableString('CloudSrc', 'Bewölkung · Herkunft', '', 41);
         $this->RegisterVariableString('Condition', 'Wetterlage', '', 42);
@@ -144,7 +150,7 @@ class WeatherStation extends IPSModule
                 'stormFarMin' => $this->ReadPropertyInteger('StormFarMin')];
 
         $neb = WE::nebel($o, $this->hoehenwerte($lat, $lon), $kamera['sicht'], $cfg);
-        $gew = WE::gewitter($o, $this->ring(), $cfg);
+        $gew = WE::gewitter($o, $this->ringMitQuellen(), $cfg);
         $this->WriteAttributeString('StrikeRing', json_encode($gew['ring']));
         $wol = WE::bewoelkung($o, $lat, $lon);
         $ns  = WE::niederschlag($o);
@@ -179,6 +185,11 @@ class WeatherStation extends IPSModule
         $this->SetValue('StormDist', $gew['dist']);
         $this->SetValue('StormRate', $gew['rate']);
         $this->SetValue('StormLast', $gew['last']);
+        $this->SetValue('StormTrend', (int) $gew['trend']);
+        $this->SetValue('StormSpeed', (float) ($gew['speed'] ?? 0.0));
+        $this->SetValue('StormEta', (int) ($gew['eta'] ?? 0));
+        // Die Warnung, auf die es ankommt: nicht "es blitzt", sondern "es kommt hierher".
+        $this->SetValue('StormApproaching', $gew['trend'] < 0 && $gew['stufe'] >= WE::GEW_GEWITTER);
         $this->SetValue('StormText', $gew['text']);
         $this->put('CloudPct', $wol['pct']);
         $this->SetValue('CloudSrc', $wol['quelle']);
@@ -414,6 +425,46 @@ class WeatherStation extends IPSModule
         return is_array($r) ? $r : [];
     }
 
+    /**
+     * Eigener Ringspeicher plus alle Einzelblitze, die die Quellen hergeben.
+     *
+     * Ohne das saehe die Station bei einem Takt von einer Minute nur den jeweils letzten Schlag
+     * — bei einer aktiven Zelle also einen von zehn. Zugrichtung und Ankunft liessen sich aus
+     * solchen Stichproben nicht bestimmen. Zusammengefuehrt wird ueber den Zeitstempel, damit
+     * derselbe Blitz aus zwei Quellen nur einmal zaehlt.
+     */
+    private function ringMitQuellen(): array
+    {
+        $ring = $this->ring();
+        $bekannt = [];
+        foreach ($ring as $e) {
+            $bekannt[(int) $e['t']] = true;
+        }
+        foreach ($this->quellen() as $q) {
+            $iid = (int) $q['InstanceID'];
+            if (!@IPS_InstanceExists($iid)) {
+                continue;
+            }
+            try {
+                $l = json_decode((string) @WXS_GetStrikes($iid), true);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            if (!is_array($l)) {
+                continue;
+            }
+            foreach ($l as $b) {
+                $t = (int) ($b['t'] ?? 0);
+                if ($t > 0 && !isset($bekannt[$t])) {
+                    $ring[] = ['t' => $t, 'd' => (float) ($b['d'] ?? 0)];
+                    $bekannt[$t] = true;
+                }
+            }
+        }
+        usort($ring, static fn($a, $b) => $a['t'] <=> $b['t']);
+        return $ring;
+    }
+
     /** Schreibt nur, wenn ein Wert da ist — sonst bleibt der letzte stehen. */
     private function put(string $ident, ?float $wert): void
     {
@@ -479,13 +530,15 @@ class WeatherStation extends IPSModule
                               [2, 'Gewitter', 0xf2a03d], [3, 'Gewitter in der Nähe', 0xf2685a]],
             'WX.Niederschlag' => [[0, 'kein Niederschlag', 0x63757b], [1, 'Regen', 0x5ab6ff],
                                   [2, 'Schneeregen', 0x9db8e6], [3, 'Schnee', 0xe7eef0]],
+            'WX.Zug' => [[-1, 'zieht auf', 0xf2685a], [0, 'steht', 0x63757b], [1, 'zieht ab', 0x39d08a]],
         ];
         foreach ($p as $name => $werte) {
             if (IPS_VariableProfileExists($name)) {
                 continue;
             }
             IPS_CreateVariableProfile($name, 1);
-            IPS_SetVariableProfileValues($name, 0, count($werte) - 1, 1);
+            $min = min(array_column($werte, 0));
+            IPS_SetVariableProfileValues($name, $min, $min + count($werte) - 1, 1);
             foreach ($werte as [$v, $t, $f]) {
                 IPS_SetVariableProfileAssociation($name, $v, $t, '', $f);
             }

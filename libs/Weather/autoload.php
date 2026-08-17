@@ -11,6 +11,8 @@ $b = __DIR__ . '/';
 foreach ([
     'Observation.php',
     'IWeatherSource.php',
+    'Profiles.php',
+    'IStrikeSource.php',
     'Engines/Meteo.php',
     'Engines/UpperAir.php',
     'Engines/WeatherEngine.php',

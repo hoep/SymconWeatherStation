@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hoep\Weather\Drivers;
 
+use Hoep\Weather\IStrikeSource;
 use Hoep\Weather\IWeatherSource;
 use Hoep\Weather\Observation;
 
@@ -19,7 +20,7 @@ use Hoep\Weather\Observation;
  * Drei-Sekunden-Takt statt im Minutenmittel, und JEDEN Blitz einzeln mit eigenem Zeitpunkt
  * und eigener Entfernung.
  */
-final class TempestUdp implements IWeatherSource
+final class TempestUdp implements IWeatherSource, IStrikeSource
 {
     private int    $instanz = 0;
     private bool   $absolut = true;
@@ -57,6 +58,33 @@ final class TempestUdp implements IWeatherSource
     public function lastError(): string
     {
         return $this->fehler;
+    }
+
+    /**
+     * Alle Blitze der letzten Stunde, einzeln. Ohne diesen Weg saehe die Station bei einem
+     * Abruftakt von einer Minute nur jeden x-ten Schlag — und aus Stichproben laesst sich
+     * keine Zugrichtung bestimmen.
+     */
+    public function strikes(): array
+    {
+        if ($this->instanz <= 0 || !@IPS_InstanceExists($this->instanz)) {
+            return [];
+        }
+        try {
+            $r = json_decode((string) @WXT_GetStrikes($this->instanz), true);
+        } catch (\Throwable $e) {
+            return [];
+        }
+        if (!is_array($r)) {
+            return [];
+        }
+        $o = [];
+        foreach ($r as $e) {
+            if (isset($e['t'], $e['d'])) {
+                $o[] = ['t' => (int) $e['t'], 'd' => (float) $e['d']];
+            }
+        }
+        return $o;
     }
 
     public function read(): Observation

@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../libs/Weather/autoload.php';
 
 use Hoep\Weather\Observation;
+use Hoep\Weather\Profiles;
 use Hoep\Weather\SourceFactory;
 
 /**
@@ -14,9 +15,11 @@ use Hoep\Weather\SourceFactory;
  * die WeatherStation fuehrt sie dann je Groesse zusammen. Das ist der Grund fuer den Schnitt:
  * keine Station kann alles, und "welche Station soll es sein?" ist die falsche Frage.
  *
- * Die Instanz haelt bewusst NUR die Rohbeobachtung als JSON und ein paar Betriebswerte —
- * die auswertbaren Variablen entstehen in der WeatherStation. Sonst haette man bei zwei
- * Stationen alles doppelt im Baum und wuesste nie, welche Variable gilt.
+ * Jede Quelle zeigt ausserdem alles, was sie liefert, als eigene Variablen. Die Werte stehen
+ * damit doppelt im Baum — hier je Station und noch einmal zusammengefuehrt in der
+ * WeatherStation. Das ist Absicht: sonst sieht man einer Anlage nicht an, WAS eine einzelne
+ * Station eigentlich misst und worin sich zwei Stationen unterscheiden. Gebunden wird an die
+ * Station, nachgesehen wird hier. Wer es schlanker will, schaltet es im Formular ab.
  */
 class WeatherSource extends IPSModule
 {
@@ -27,6 +30,8 @@ class WeatherSource extends IPSModule
         $this->RegisterPropertyString('Driver', 'davis-actdata');
         $this->RegisterPropertyInteger('Interval', 5);      // Sekunden, 0 = aus
         $this->RegisterPropertyInteger('MaxAge', 900);      // Werte aelter als das gelten als tot
+        $this->RegisterPropertyBoolean('Mirror', true);     // Werte zusaetzlich als Variablen zeigen
+        $this->RegisterPropertyBoolean('Logging', true);    // eigene Messreihen archivieren
 
         // Fuer JEDES Feld JEDES Treibers eine echte Eigenschaft anlegen. Symcon speichert
         // beim Uebernehmen nur, was hier registriert ist — ein Formularfeld ohne Eigenschaft
@@ -81,6 +86,9 @@ class WeatherSource extends IPSModule
         $this->SetValue('Online', $fehler === '' && !$o->leer());
         if (!$o->leer()) {
             $this->SetValue('LastRead', time());
+            if ($this->ReadPropertyBoolean('Mirror')) {
+                $this->mirror($o);
+            }
         }
     }
 
@@ -91,6 +99,24 @@ class WeatherSource extends IPSModule
     public function GetObservation(): string
     {
         return json_encode($this->readSource($f)->toArray(), JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Einzelne Blitze, sofern der Treiber sie hat. Leere Liste heisst "kann diese Quelle nicht" —
+     * die Station faellt dann auf den letzten Blitz aus der Beobachtung zurueck.
+     */
+    public function GetStrikes(): string
+    {
+        $id = $this->ReadPropertyString('Driver');
+        if (!SourceFactory::has($id)) {
+            return '[]';
+        }
+        try {
+            $t = SourceFactory::create($id, $this->driverConfig($id));
+            return json_encode($t instanceof \Hoep\Weather\IStrikeSource ? $t->strikes() : []);
+        } catch (\Throwable $e) {
+            return '[]';
+        }
     }
 
     /** Probelauf fuer das Formular: liest einmal und zeigt alles, was ankommt. */
@@ -163,6 +189,70 @@ class WeatherSource extends IPSModule
         return $c;
     }
 
+    /**
+     * Legt jede gelieferte Groesse zusaetzlich als eigene Variable an.
+     *
+     * Die Werte stehen dadurch DOPPELT im Baum — einmal hier je Quelle, einmal in der
+     * zusammengefuehrten Station. Das ist Absicht: nur so ist im Objektbaum nachvollziehbar,
+     * WAS eine einzelne Station eigentlich liefert und wie sie sich von der anderen
+     * unterscheidet. Eine Zeichenkette voller JSON beantwortet diese Frage nicht.
+     *
+     * Angelegt wird erst, wenn eine Groesse zum ersten Mal auftaucht: welche das sind, weiss
+     * man vor dem ersten Lesen nicht, und leere Variablen fuer alles waeren nur Rauschen.
+     */
+    private function mirror(Observation $o): void
+    {
+        Profiles::ensure();
+        $pos = 100;
+        foreach (array_keys(Observation::QUANTITIES) as $ident) {
+            $pos += 10;
+            if (!$o->has($ident)) {
+                continue;
+            }
+            [$label, $einheit] = Observation::QUANTITIES[$ident];
+            $name = $label . ($einheit !== '' ? ' (' . $einheit . ')' : '');
+            $var  = 'q_' . $ident;
+            if ($ident === 'strikeTime') {
+                $this->RegisterVariableInteger($var, $name, Profiles::forQuantity($ident), $pos);
+                $this->SetValue($var, (int) $o->get($ident));
+                continue;
+            }
+            $this->RegisterVariableFloat($var, $name, Profiles::forQuantity($ident), $pos);
+            $this->SetValue($var, (float) $o->num($ident));
+        }
+        if ($this->ReadPropertyBoolean('Logging')) {
+            $this->applyLogging($o);
+        }
+    }
+
+    /**
+     * Archiviert die Messreihen DIESER Quelle.
+     *
+     * Auch das ist bewusst doppelt zur Station: erst getrennte Reihen je Station machen im
+     * Nachhinein sichtbar, ob eine Station driftet, aussetzt oder systematisch anders misst
+     * als die andere. In der zusammengefuehrten Reihe ist das nicht mehr zu erkennen.
+     *
+     * Nicht archiviert werden Zaehler und Kennungen (Blitzzeitpunkt, Niederschlagsart der
+     * Station, Batteriespannung) — die sind Zustand, keine Messreihe.
+     */
+    private function applyLogging(Observation $o): void
+    {
+        static $nicht = ['strikeTime', 'precipType', 'pressureTrend'];
+        $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
+        if (!$aid) {
+            return;
+        }
+        foreach ($o->idents() as $ident) {
+            if (in_array($ident, $nicht, true)) {
+                continue;
+            }
+            $vid = @$this->GetIDForIdent('q_' . $ident);
+            if ($vid && !AC_GetLoggingStatus($aid, $vid)) {
+                AC_SetLoggingStatus($aid, $vid, true);
+            }
+        }
+    }
+
     /** Eigenschaftsname aus Treiberkennung und Feld, ohne Zeichen, die Symcon nicht mag. */
     private static function propName(string $driverId, string $feld): string
     {
@@ -191,6 +281,14 @@ class WeatherSource extends IPSModule
                 ['type' => 'NumberSpinner', 'name' => 'MaxAge', 'caption' => 'Werte gelten höchstens (Sekunden)',
                  'minimum' => 30, 'maximum' => 86400],
             ]],
+            ['type' => 'CheckBox', 'name' => 'Mirror',
+             'caption' => 'Gelieferte Werte zusätzlich als eigene Variablen zeigen'],
+            ['type' => 'CheckBox', 'name' => 'Logging',
+             'caption' => 'Messreihen dieser Quelle archivieren'],
+            ['type' => 'Label', 'caption' => 'Die Werte stehen dann doppelt im Baum — einmal hier je '
+                . 'Station und einmal zusammengeführt in der WeatherStation. Das ist Absicht: nur so '
+                . 'ist nachvollziehbar, was eine einzelne Station wirklich liefert und worin sich zwei '
+                . 'Stationen unterscheiden.'],
             ['type' => 'Label', 'caption' => 'Der Abruftakt sollte zur Quelle passen: schneller abzufragen, '
                 . 'als die Quelle neue Werte bildet, kostet nur Last. Die Geltungsdauer entscheidet, '
                 . 'wann die Zusammenführung eine Quelle für tot hält und auf eine andere ausweicht.'],

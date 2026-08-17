@@ -63,6 +63,21 @@ dadurch sogar aktueller als im Original.
 den letzten Schlag; damit lässt sich ein einzelner Blitz in 40 km nicht von zwölf Blitzen in
 5 km unterscheiden. Erst der Ringspeicher macht Entfernung *und* Häufigkeit auswertbar.
 
+**Zieht es auf?** Das ist die Frage, die zählt — „Blitz in 27 km" sagt nicht, ob man Fenster
+schließen oder weiterarbeiten soll. Dafür wird je Fünf-Minuten-Fenster der Median der
+Entfernungen gebildet und durch diese Fenster eine Ausgleichsgerade gelegt. Fällt sie, zieht
+es auf; aus der Steigung fallen Annäherungsgeschwindigkeit und ungefähre Ankunft ab.
+
+Der Median ist dabei nicht Zierde: Blitze **einer** Zelle schlagen am nahen wie am fernen Rand
+ein, bei einer 15 km großen Zelle also über 15 km Spanne. Eine Gerade durch alle Einzelwerte
+folgt dieser Streuung statt der Zugbewegung — im Betrieb gemessen: 118 km/h für eine Zelle,
+die tatsächlich mit knapp 80 heranzog. Über 90 km/h wird gar keine Aussage gemacht: so ein
+Wert heißt nicht „sehr schnell", sondern „die Daten geben keine Zugbewegung her".
+
+Gemessen wird streng genommen, wie schnell sich die *Blitztätigkeit* nähert — bei neu
+entstehenden Zellen kann das schneller sein als die Zuggeschwindigkeit der Zelle selbst. Für
+die praktische Frage, wieviel Zeit bleibt, ist genau das die richtige Größe.
+
 **Bewölkung** aus gemessener Strahlung gegen den Klarhimmelwert nach Haurwitz, umgerechnet
 nach Kasten & Czeplak. Steht die Sonne unter 5 Grad, gibt es keine Aussage statt einer
 erfundenen Zahl.
@@ -92,6 +107,19 @@ mitsinken, gewöhnte sich die Anlage während einer langen Nebellage an den Nebe
 ihn nicht mehr. Nach Umbau oder Reinigung einer Kamera lässt er sich im Formular verwerfen.
 
 Braucht GD in PHP (in IP-Symcon enthalten). Eine Messung kostet 25 bis 50 ms je Kamera.
+
+## Was im Baum sichtbar ist
+
+Jede Quelle zeigt alles, was sie liefert, als eigene Variablen — zusätzlich zur
+zusammengeführten Station. Die Werte stehen damit doppelt im Baum, und das ist Absicht: sonst
+sieht man einer Anlage nicht an, was eine einzelne Station eigentlich misst und worin sich zwei
+Stationen unterscheiden. Gebunden wird an die Station, nachgesehen wird an der Quelle. Beides
+lässt sich im Formular abschalten.
+
+Archiviert werden die Messreihen der Station und die jeder Quelle getrennt. Auch das doppelt,
+aus demselben Grund: erst getrennte Reihen zeigen im Nachhinein, ob eine Station driftet,
+aussetzt oder systematisch anders misst. Zähler und Kennungen bleiben außen vor — die sind
+Zustand, keine Messreihe.
 
 ## Aufbau
 

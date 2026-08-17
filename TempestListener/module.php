@@ -6,6 +6,7 @@ require_once __DIR__ . '/../libs/Weather/autoload.php';
 
 use Hoep\Weather\Engines\Meteo;
 use Hoep\Weather\Observation;
+use Hoep\Weather\Profiles;
 
 /**
  * TempestListener (WXT) — hoert der WeatherFlow Tempest direkt zu.
@@ -43,6 +44,7 @@ class TempestListener extends IPSModule
         parent::Create();
         $this->RegisterPropertyString('Serial', '');       // leer = jede Station annehmen
         $this->RegisterPropertyBoolean('RapidWind', true); // Boeenwerte im 3-Sekunden-Takt
+        $this->RegisterPropertyBoolean('Mirror', true);    // empfangene Werte als Variablen zeigen
 
         $this->RegisterVariableString('Data', 'Beobachtung (JSON)', '', 10);
         $this->RegisterVariableInteger('LastObs', 'Letzter Messsatz', '~UnixTimestamp', 20);
@@ -60,6 +62,13 @@ class TempestListener extends IPSModule
     public function ApplyChanges()
     {
         parent::ApplyChanges();
+        // Die Blitzzahl je Stunde ist eine echte Messreihe — sie zeigt im Nachhinein, wie
+        // stark eine Zelle war und wann sie durchgezogen ist.
+        $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
+        $vid = @$this->GetIDForIdent('Strikes1h');
+        if ($aid && $vid && !AC_GetLoggingStatus($aid, $vid)) {
+            AC_SetLoggingStatus($aid, $vid, true);
+        }
         $this->SetStatus(102);
     }
 
@@ -118,6 +127,9 @@ class TempestListener extends IPSModule
         $this->SetValue('LastObs', (int) ($w['zeit'] ?? time()));
         $this->SetValue('Packets', $this->GetValue('Packets') + 1);
         $this->SetValue('Data', $this->GetObservation());
+        if ($this->ReadPropertyBoolean('Mirror')) {
+            $this->mirror();
+        }
     }
 
     /**
@@ -213,6 +225,39 @@ class TempestListener extends IPSModule
         return json_encode($o->toArray(), JSON_UNESCAPED_UNICODE);
     }
 
+    /**
+     * Zeigt die empfangenen Werte als eigene Variablen.
+     *
+     * Ja, das ist doppelt zur Quelle und zur Station. Genau deshalb: an diesem Knoten will man
+     * sehen, was die STATION SELBST gefunkt hat — ohne Zusammenfuehrung, ohne Umrechnung, ohne
+     * eine andere Quelle dazwischen. Eine JSON-Zeichenkette beantwortet das nicht.
+     */
+    private function mirror(): void
+    {
+        Profiles::ensure();
+        $a = json_decode($this->GetObservation(), true);
+        if (!is_array($a)) {
+            return;
+        }
+        $pos = 100;
+        foreach (array_keys(Observation::QUANTITIES) as $ident) {
+            $pos += 10;
+            if (!isset($a[$ident]['wert'])) {
+                continue;
+            }
+            [$label, $einheit] = Observation::QUANTITIES[$ident];
+            $name = $label . ($einheit !== '' ? ' (' . $einheit . ')' : '');
+            $var  = 'q_' . $ident;
+            if ($ident === 'strikeTime') {
+                $this->RegisterVariableInteger($var, $name, Profiles::forQuantity($ident), $pos);
+                $this->SetValue($var, (int) $a[$ident]['wert']);
+                continue;
+            }
+            $this->RegisterVariableFloat($var, $name, Profiles::forQuantity($ident), $pos);
+            $this->SetValue($var, (float) $a[$ident]['wert']);
+        }
+    }
+
     /** Alle Blitze der letzten Stunde, einzeln — fuer die Gewitterauswertung. */
     public function GetStrikes(): string
     {
@@ -256,6 +301,7 @@ class TempestListener extends IPSModule
                 . 'darf mehrere Kinder haben, und ein Broadcast erreicht sie alle.'],
             ['type' => 'ValidationTextBox', 'name' => 'Serial', 'caption' => 'Seriennummer (leer = jede Station)'],
             ['type' => 'CheckBox', 'name' => 'RapidWind', 'caption' => 'Windwerte im Drei-Sekunden-Takt übernehmen'],
+            ['type' => 'CheckBox', 'name' => 'Mirror', 'caption' => 'Empfangene Werte als eigene Variablen zeigen'],
             ['type' => 'Label', 'caption' =>
                 'Der Beobachtungssatz kommt nur einmal pro Minute. Der Drei-Sekunden-Wind ist deshalb '
                 . 'der einzige Weg zu einem wirklich aktuellen Windwert — für Beschattung und '
