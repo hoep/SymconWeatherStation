@@ -31,7 +31,7 @@ class WeatherStation extends IPSModule
     private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'Wind', 'WindAvg', 'Gust', 'WindDir',
                             'Pressure', 'RainRate', 'RainDay', 'Radiation', 'UV', 'CloudPct',
                             'FogLevel', 'FogPct', 'FogFSI', 'PrecipType', 'StormLevel', 'StormDist',
-                            'StormRate', 'StormTrend', 'StormSpeed', 'StormApproaching',
+                            'StormRate', 'StormTrend', 'StormSpeed', 'StormEta', 'StormApproaching',
                             'SightPct', 'SnowCover', 'Condition'];
 
     public function Create()
