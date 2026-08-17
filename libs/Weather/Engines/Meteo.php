@@ -142,6 +142,76 @@ final class Meteo
         return round(2.0 * ($t - $td) + 2.0 * ($t - $t850) + $w850kn, 1);
     }
 
+    /**
+     * Dampfdruck in hPa aus Temperatur und relativer Feuchte (Magnus).
+     * Zwischengroesse fuer die absolute Feuchte und die gefuehlte Temperatur.
+     */
+    public static function dampfdruck(float $t, float $rh): float
+    {
+        $a = ($t >= 0.0) ? 17.62 : 22.46;
+        $b = ($t >= 0.0) ? 243.12 : 272.62;
+        return round(max(0.0, min(100.0, $rh)) / 100.0 * 6.112 * exp(($a * $t) / ($b + $t)), 4);
+    }
+
+    /**
+     * Absolute Feuchte in Gramm je Kubikmeter: AH = 216,69 * e / T.
+     *
+     * Der Faktor ist 10^5 * M(Wasser) / R = 100000 * 18,016 / 8314,3. Anders als die relative
+     * Feuchte haengt sie nicht von der Temperatur ab und ist deshalb das richtige Mass, wenn
+     * man Innen- und Aussenluft vergleicht — etwa fuer die Frage, ob Lueften die Raumluft
+     * trockener macht oder feuchter.
+     */
+    public static function absoluteFeuchte(float $t, float $rh): float
+    {
+        return round(216.69 * self::dampfdruck($t, $rh) / ($t + 273.15), 2);
+    }
+
+    /**
+     * Gefuehlte Temperatur in Grad C.
+     *
+     * Drei Verfahren, je nach Lage — ein einziges gibt es nicht, weil bei Hitze die Feuchte
+     * und bei Kaelte der Wind entscheidet:
+     *
+     * - ab 27 Grad der HITZEINDEX nach Rothfusz (Feuchte staut die Waerme, Schweiss verdunstet
+     *   nicht mehr),
+     * - unter 10 Grad bei mehr als 4,8 km/h Wind der WINDCHILL nach JAG/TI 2001 (Wind traegt
+     *   die waermende Grenzschicht ab),
+     * - dazwischen die AUSTRALISCHE Scheinbare Temperatur nach Steadman, die beides milder
+     *   verrechnet: AT = T + 0,33e − 0,70v − 4,00 mit e in hPa und v in m/s.
+     */
+    public static function gefuehlt(float $t, float $rh, float $windKmh): float
+    {
+        if ($t >= 27.0) {
+            $tf = $t * 9 / 5 + 32;
+            $hi = -42.379 + 2.04901523 * $tf + 10.14333127 * $rh
+                - 0.22475541 * $tf * $rh - 0.00683783 * $tf * $tf
+                - 0.05481717 * $rh * $rh + 0.00122874 * $tf * $tf * $rh
+                + 0.00085282 * $tf * $rh * $rh - 0.00000199 * $tf * $tf * $rh * $rh;
+            return round(($hi - 32) * 5 / 9, 1);
+        }
+        if ($t <= 10.0 && $windKmh > 4.8) {
+            $v = pow($windKmh, 0.16);
+            return round(13.12 + 0.6215 * $t - 11.37 * $v + 0.3965 * $t * $v, 1);
+        }
+        return round($t + 0.33 * self::dampfdruck($t, $rh) - 0.70 * ($windKmh / 3.6) - 4.00, 1);
+    }
+
+    /** Windrichtung als Himmelsrichtung, 16 Sektoren. */
+    public static function windrichtungText(float $grad): string
+    {
+        $r = ['N', 'NNO', 'NO', 'ONO', 'O', 'OSO', 'SO', 'SSO',
+              'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+        return $r[(int) round(fmod($grad + 360.0, 360.0) / 22.5) % 16];
+    }
+
+    /** Mondphase als Name. Die Grenzen sind die ueblichen Achtel des Umlaufs. */
+    public static function mondphaseText(float $phase): string
+    {
+        $n = ['Neumond', 'zunehmende Sichel', 'Erstes Viertel', 'zunehmender Mond',
+              'Vollmond', 'abnehmender Mond', 'Letztes Viertel', 'abnehmende Sichel'];
+        return $n[((int) floor(fmod($phase + 1 / 16, 1.0) * 8)) % 8];
+    }
+
     /** Windgeschwindigkeit km/h in Knoten. */
     public static function kmhInKnoten(float $kmh): float
     {
@@ -150,13 +220,23 @@ final class Meteo
 
     /**
      * Mondphase 0..1 (0 = Neumond, 0,5 = Vollmond) und Beleuchtungsgrad 0..1.
-     * Genauigkeit etwa 0,5 Prozent — fuer eine Anzeige mehr als genug.
+     *
+     * ACHTUNG BEIM BEZUGSPUNKT: der uebliche Ausgangspunkt J2000.0 (1.1.2000, 12 Uhr) ist
+     * KEIN Neumond — der naechste lag am 6.1.2000 um 18:14 UTC. Wer die Tage seit J2000 einfach
+     * durch die synodische Umlaufzeit teilt, liegt dauerhaft um rund 0,19 Phasen daneben, also
+     * fast sechs Tage: eine zunehmende Sichel wird so zum zunehmenden Dreiviertelmond, und der
+     * Beleuchtungsgrad stimmt entsprechend nicht. Deshalb wird ab dem echten Neumond gerechnet.
+     *
+     * Genauigkeit etwa ein halber Tag — die Umlaufzeit schwankt real um einige Stunden. Fuer
+     * eine Anzeige reicht das; fuer eine Finsternisvorhersage nicht.
+     *
      * @return array{phase:float,beleuchtet:float,zunehmend:bool}
      */
     public static function mond(?int $zeit = null): array
     {
-        $nn    = (($zeit ?? time()) / 86400.0 + 2440587.5) - 2451545.0;
-        $phase = fmod((fmod($nn, 29.530588853) + 29.530588853) / 29.530588853, 1.0);
+        $jd = ($zeit ?? time()) / 86400.0 + 2440587.5;
+        $seit = $jd - 2451550.1;                       // Neumond 6.1.2000, 18:14 UTC
+        $phase = fmod(fmod($seit, 29.530588853) + 29.530588853, 29.530588853) / 29.530588853;
         return ['phase' => round($phase, 4),
                 'beleuchtet' => round((1 - cos(2 * M_PI * $phase)) / 2, 4),
                 'zunehmend' => $phase < 0.5];

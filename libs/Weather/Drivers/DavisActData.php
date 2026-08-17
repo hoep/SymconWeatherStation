@@ -36,7 +36,8 @@ final class DavisActData implements IWeatherSource
                   F_REGEN_M = 38, F_REGEN_J = 39, F_ET_T = 40, F_TREND = 51,
                   // Zusatzsensoren: Bodentemperatur 16..19, Bodenfeuchte 43..46,
                   // Blattfeuchte 47..50. Nicht angeschlossene Kanaele stehen auf `---`.
-                  F_BODEN_T = 16, F_BODEN_F = 43, F_BLATT_F = 47;
+                  F_BODEN_T = 16, F_BODEN_F = 43, F_BLATT_F = 47,
+                  F_REGEN_LETZT = 35, F_ET_M = 41, F_ET_J = 42, F_VORHERSAGE = 70;
 
     private string $url = '';
     private string $tz = 'UTC';
@@ -130,6 +131,10 @@ final class DavisActData implements IWeatherSource
         $o->set('rainMonthMm', $this->menge($f, self::F_REGEN_M), $ts);
         $o->set('rainYearMm', $this->menge($f, self::F_REGEN_J), $ts);
         $o->set('etDayMm', $this->menge($f, self::F_ET_T), $ts);
+        $o->set('etMonthMm', $this->menge($f, self::F_ET_M), $ts);
+        $o->set('etYearMm', $this->menge($f, self::F_ET_J), $ts);
+        $o->set('rainLastMm', $this->menge($f, self::F_REGEN_LETZT), $ts);
+        $o->set('forecastCode', $this->zahl($f, self::F_VORHERSAGE), $ts);
         $o->set('uvIndex', $this->zahl($f, self::F_UV), $ts);
         $o->set('radiationWm2', $this->zahl($f, self::F_STRAHLUNG), $ts);
 

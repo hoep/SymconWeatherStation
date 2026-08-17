@@ -6,6 +6,7 @@ require_once __DIR__ . '/../libs/Weather/autoload.php';
 
 use Hoep\Weather\Engines\CameraVision;
 use Hoep\Weather\Engines\Meteo;
+use Hoep\Weather\Engines\StationCodes;
 use Hoep\Weather\Engines\UpperAir;
 use Hoep\Weather\Engines\WeatherEngine as WE;
 use Hoep\Weather\Observation;
@@ -32,7 +33,9 @@ class WeatherStation extends IPSModule
                             'Pressure', 'RainRate', 'RainDay', 'Radiation', 'UV', 'CloudPct',
                             'FogLevel', 'FogPct', 'FogFSI', 'PrecipType', 'StormLevel', 'StormDist',
                             'StormRate', 'StormTrend', 'StormSpeed', 'StormEta', 'StormApproaching',
-                            'SightPct', 'SnowCover', 'Condition'];
+                            'SightPct', 'SnowCover', 'Condition',
+                            'AppTemp', 'AbsHum', 'TempDamped', 'TempMin', 'TempMax',
+                            'WindMin', 'WindMax'];
 
     public function Create()
     {
@@ -45,6 +48,7 @@ class WeatherStation extends IPSModule
         $this->RegisterPropertyString('Cameras', '[]');   // [{MediaID,Name,X,Y,W,H,Enabled}]
         $this->RegisterPropertyBoolean('UseCameras', true);
         $this->RegisterPropertyBoolean('Logging', true);
+        $this->RegisterPropertyInteger('DampMinutes', 15);   // Fenster der gedaempften Temperatur
 
         $this->RegisterPropertyFloat('FogHum', WE::STD['fogHum']);
         $this->RegisterPropertyFloat('FogWind', WE::STD['fogWind']);
@@ -72,6 +76,23 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableFloat('Radiation', 'Globalstrahlung', 'WX.Strahlung', 19);
         $this->RegisterVariableFloat('UV', 'UV-Index', $this->prof('~UVIndex'), 20);
 
+        $this->RegisterVariableFloat('AppTemp', 'Gefühlte Temperatur', $this->prof('~Temperature'), 21);
+        $this->RegisterVariableFloat('AbsHum', 'Absolute Feuchte', 'WX.AbsFeuchte', 22);
+        $this->RegisterVariableFloat('TempDamped', 'Temperatur gedämpft', $this->prof('~Temperature'), 23);
+        $this->RegisterVariableString('WindDirText', 'Windrichtung (Text)', '', 24);
+        $this->RegisterVariableString('PressureTrendText', 'Luftdrucktendenz', '', 25);
+        $this->RegisterVariableString('ForecastText', 'Vorhersage der Station', '', 26);
+
+        // --- Tageswerte mit Zeitpunkt ---
+        $this->RegisterVariableFloat('TempMin', 'Temperatur Minimum heute', $this->prof('~Temperature'), 80);
+        $this->RegisterVariableFloat('TempMax', 'Temperatur Maximum heute', $this->prof('~Temperature'), 81);
+        $this->RegisterVariableInteger('TempMinTime', 'Zeit Minimum', '~UnixTimestamp', 82);
+        $this->RegisterVariableInteger('TempMaxTime', 'Zeit Maximum', '~UnixTimestamp', 83);
+        $this->RegisterVariableFloat('WindMin', 'Wind Minimum heute', $this->prof('~WindSpeed.kmh'), 84);
+        $this->RegisterVariableFloat('WindMax', 'Wind Maximum heute', $this->prof('~WindSpeed.kmh'), 85);
+        $this->RegisterVariableInteger('WindMinTime', 'Zeit Wind Minimum', '~UnixTimestamp', 86);
+        $this->RegisterVariableInteger('WindMaxTime', 'Zeit Wind Maximum', '~UnixTimestamp', 87);
+
         // --- Abgeleitet ---
         $this->RegisterVariableFloat('WetBulb', 'Feuchtkugel', '~Temperature', 30);
         $this->RegisterVariableInteger('PrecipType', 'Niederschlagsart', 'WX.Niederschlag', 31);
@@ -90,6 +111,7 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableString('StormText', 'Gewitter · Klartext', '', 43);
         $this->RegisterVariableFloat('CloudPct', 'Bewölkung', '~Intensity.100', 40);
         $this->RegisterVariableString('CloudSrc', 'Bewölkung · Herkunft', '', 41);
+        $this->RegisterVariableString('MoonPhaseText', 'Mondphase', '', 64);
         $this->RegisterVariableString('Condition', 'Wetterlage', '', 42);
 
         // --- Kamera ---
@@ -109,6 +131,7 @@ class WeatherStation extends IPSModule
         $this->RegisterAttributeString('CamBase', '{}');
         $this->RegisterAttributeString('StrikeRing', '[]');
         $this->RegisterAttributeString('Upper', '{}');
+        $this->RegisterAttributeString('Damp', '[]');
 
         $this->RegisterTimer('Tick', 0, 'WX_Update($_IPS[\'TARGET\']);');
     }
@@ -169,6 +192,23 @@ class WeatherStation extends IPSModule
         $this->put('RainDay', $o->num('rainDayMm'));
         $this->put('Radiation', $o->num('radiationWm2'));
         $this->put('UV', $o->num('uvIndex'));
+
+        // Gefuehlte Temperatur, absolute Feuchte, Daempfung und die Klartexte.
+        $t  = $o->num('tempC');
+        $rh = $o->num('humPct');
+        $ws = $o->num('windKmh') ?? $o->num('windAvgKmh') ?? 0.0;
+        if ($t !== null && $rh !== null) {
+            $this->put('AppTemp', Meteo::gefuehlt($t, $rh, $ws));
+            $this->put('AbsHum', Meteo::absoluteFeuchte($t, $rh));
+        }
+        $this->put('TempDamped', $this->daempfen($t));
+        if ($o->has('windDirDeg')) {
+            $this->SetValue('WindDirText', Meteo::windrichtungText((float) $o->num('windDirDeg')));
+        }
+        $this->SetValue('PressureTrendText', StationCodes::tendenzText($o->num('pressureTrend')));
+        $this->SetValue('ForecastText', StationCodes::vorhersageText($o->num('forecastCode')));
+        $this->SetValue('MoonPhaseText', Meteo::mondphaseText((float) Meteo::mond()['phase']));
+        $this->tageswerte();
 
         $this->put('WetBulb', $ns['twet']);
         $this->SetValue('PrecipType', $ns['art']);
@@ -465,6 +505,68 @@ class WeatherStation extends IPSModule
         return $ring;
     }
 
+    /**
+     * Gedaempfte Aussentemperatur: gleitender Mittelwert ueber ein Zeitfenster.
+     *
+     * Beschattung und Heizung sollen nicht auf jede Boe und jede Wolke reagieren. Die alte
+     * Loesung mittelte die letzten DREI Archivwerte — das ist je nach Aufzeichnungsdichte mal
+     * eine Minute und mal eine Viertelstunde, also kein definiertes Fenster. Hier ist es eine
+     * feste Zeitspanne, unabhaengig davon, wie oft aufgezeichnet wird.
+     */
+    private function daempfen(?float $wert): ?float
+    {
+        if ($wert === null) {
+            return null;
+        }
+        $min = max(1, $this->ReadPropertyInteger('DampMinutes'));
+        $r = json_decode($this->ReadAttributeString('Damp'), true);
+        if (!is_array($r)) {
+            $r = [];
+        }
+        $jetzt = time();
+        $r[] = ['t' => $jetzt, 'v' => $wert];
+        $r = array_values(array_filter($r, static fn($e) => ($jetzt - (int) $e['t']) <= $min * 60));
+        $this->WriteAttributeString('Damp', json_encode(array_slice($r, -200)));
+        $summe = 0.0;
+        foreach ($r as $e) {
+            $summe += (float) $e['v'];
+        }
+        return round($summe / max(1, count($r)), 1);
+    }
+
+    /**
+     * Tagesminimum und -maximum samt Zeitpunkt, aus dem Archiv der eigenen Variablen.
+     *
+     * Bewusst aus dem Archiv und nicht aus mitgefuehrten Merkern: nach einem Neustart waeren
+     * Merker leer, das Archiv weiss es noch. Ohne Archiv bleiben die Werte stehen — falsche
+     * Extremwerte waeren schlimmer als keine.
+     */
+    private function tageswerte(): void
+    {
+        $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
+        if (!$aid) {
+            return;
+        }
+        $von = strtotime('today 00:00');
+        foreach ([['Temp', 'TempMin', 'TempMax', 'TempMinTime', 'TempMaxTime'],
+                  ['Wind', 'WindMin', 'WindMax', 'WindMinTime', 'WindMaxTime']] as $satz) {
+            [$quelle, $iMin, $iMax, $iMinT, $iMaxT] = $satz;
+            $vid = @$this->GetIDForIdent($quelle);
+            if (!$vid || !AC_GetLoggingStatus($aid, $vid)) {
+                continue;
+            }
+            $a = @AC_GetAggregatedValues($aid, $vid, 1 /* Tag */, $von, time(), 0);
+            if (!is_array($a) || $a === []) {
+                continue;
+            }
+            $t = $a[0];
+            $this->SetValue($iMin, (float) $t['Min']);
+            $this->SetValue($iMax, (float) $t['Max']);
+            $this->SetValue($iMinT, (int) ($t['MinTime'] ?? 0));
+            $this->SetValue($iMaxT, (int) ($t['MaxTime'] ?? 0));
+        }
+    }
+
     /** Schreibt nur, wenn ein Wert da ist — sonst bleibt der letzte stehen. */
     private function put(string $ident, ?float $wert): void
     {
@@ -532,6 +634,7 @@ class WeatherStation extends IPSModule
             'WX.Strahlung' => [' W/m²', 0, 0.0, 1400.0],
             'WX.Grad'      => ['°', 0, 0.0, 360.0],
             'WX.FSI'       => ['', 0, 0.0, 200.0],
+            'WX.AbsFeuchte'=> [' g/m³', 2, 0.0, 60.0],
         ];
         foreach ($u as $name => [$suffix, $dig, $min, $max]) {
             if (IPS_VariableProfileExists($name)) {
@@ -679,6 +782,10 @@ class WeatherStation extends IPSModule
                 ]],
             ]],
 
+            ['type' => 'NumberSpinner', 'name' => 'DampMinutes',
+             'caption' => 'Fenster der gedämpften Temperatur (Minuten)', 'minimum' => 1, 'maximum' => 180],
+            ['type' => 'Label', 'caption' => 'Die gedämpfte Außentemperatur glättet über dieses Fenster. '
+                . 'Beschattung und Heizung sollen nicht auf jede Wolke reagieren.'],
             ['type' => 'CheckBox', 'name' => 'Logging', 'caption' => 'Messreihen archivieren (Temperatur, Feuchte, Wind, Nebel, Bewölkung …)'],
             ['type' => 'RowLayout', 'items' => [
                 ['type' => 'Button', 'caption' => 'Jetzt auswerten', 'onClick' => 'WX_Update($id);'],
