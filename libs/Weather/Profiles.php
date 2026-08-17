@@ -25,6 +25,8 @@ final class Profiles
         'WX.FSI'       => ['', 0, 0.0, 200.0],
         'WX.km'        => [' km', 0, 0.0, 100.0],
         'WX.mm'        => [' mm', 2, 0.0, 5000.0],
+        'WX.cb'        => [' cb', 0, 0.0, 200.0],
+        'WX.Blatt'     => ['', 0, 0.0, 15.0],
     ];
 
     private function __construct()

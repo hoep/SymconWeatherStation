@@ -170,7 +170,9 @@ final class WeatherEngine
                     $text .= sprintf(', hier in etwa %d min', $zug['eta']);
                 }
             } elseif ($zug['trend'] > 0) {
-                $text .= sprintf(' — zieht ab mit %.0f km/h', $zug['speed']);
+                $text .= $zug['speed'] !== null
+                    ? sprintf(' — zieht ab mit %.0f km/h', $zug['speed'])
+                    : ' — zieht ab';
             }
         }
         return ['stufe' => $stufe, 'dist' => $dl === null ? 0 : (int) round($dl),
@@ -202,13 +204,12 @@ final class WeatherEngine
         // Blitze EINER Zelle streuen stark: sie schlagen am nahen wie am fernen Rand ein, bei
         // einer 15 km grossen Zelle also ueber 15 km Spanne. Eine Ausgleichsgerade durch alle
         // Einzelwerte folgt dieser Streuung statt der Zugbewegung und liefert Phantasiewerte
-        // (im Betrieb gemessen: 118 km/h fuer eine Zelle, die tatsaechlich mit etwa 50 km/h zog).
-        // Deshalb erst je Fuenf-Minuten-Fenster den MEDIAN bilden und dann die Gerade durch die
-        // Fenster legen — der Median ist gegen Ausreisser an beiden Raendern unempfindlich.
+        // (im Betrieb gemessen: 118 km/h fuer eine Zelle, die tatsaechlich mit etwa 80 heranzog).
+        // Deshalb erst je Fuenf-Minuten-Fenster den MEDIAN bilden — der ist gegen Ausreisser an
+        // beiden Raendern unempfindlich.
         $fenster = [];
         foreach ($p as $e) {
-            $k = (int) floor((int) $e['t'] / 300);
-            $fenster[$k][] = (float) $e['d'];
+            $fenster[(int) floor((int) $e['t'] / 300)][] = (float) $e['d'];
         }
         ksort($fenster);
         $punkte = [];
@@ -219,14 +220,38 @@ final class WeatherEngine
                          'd' => $n % 2 ? $werte[intdiv($n, 2)]
                                        : ($werte[$n / 2 - 1] + $werte[$n / 2]) / 2];
         }
-        $n = count($punkte);
-        if ($n < 3) {
+        $anz = count($punkte);
+        if ($anz < 3) {
             return ['trend' => 0, 'speed' => null, 'eta' => null];
         }
 
-        $t0 = (int) $punkte[0]['t'];
+        // WENDEPUNKT ZUERST. Ein Gewitter zieht heran, steht kurz ueber einem und zieht weiter —
+        // die Entfernung faellt also erst und steigt danach wieder. Eine Gerade ueber die ganze
+        // Dreiviertelstunde wird von der langen Anmarschphase beherrscht und meldet noch
+        // "zieht auf", waehrend die Zelle laengst abzieht. Massgeblich ist deshalb, ob die
+        // dichteste Annaeherung schon VORBEI ist: liegt sie mindestens ein Fenster zurueck und
+        // ist die Entfernung seither um mehr als 3 km gestiegen, zieht das Gewitter ab.
+        $iMin = 0;
+        for ($i = 1; $i < $anz; $i++) {
+            if ($punkte[$i]['d'] < $punkte[$iMin]['d']) {
+                $iMin = $i;
+            }
+        }
+        $jetztD = (float) $punkte[$anz - 1]['d'];
+        $minD   = (float) $punkte[$iMin]['d'];
+        if ($iMin < $anz - 1 && ($jetztD - $minD) > 3.0) {
+            $dt = max(1.0, ($punkte[$anz - 1]['t'] - $punkte[$iMin]['t']) / 60.0);
+            $kmh = round(($jetztD - $minD) / $dt * 60.0, 1);
+            return ['trend' => 1, 'speed' => ($kmh > 90.0 ? null : $kmh), 'eta' => null];
+        }
+
+        // Sonst die Entwicklung der LETZTEN etwa 20 Minuten, nicht des ganzen Fensters: was vor
+        // einer halben Stunde war, sagt ueber die naechsten Minuten wenig.
+        $j = array_slice($punkte, -4);
+        $n = count($j);
+        $t0 = (int) $j[0]['t'];
         $sx = $sy = $sxy = $sxx = 0.0;
-        foreach ($punkte as $e) {
+        foreach ($j as $e) {
             $x = ((int) $e['t'] - $t0) / 60.0;
             $y = (float) $e['d'];
             $sx += $x; $sy += $y; $sxy += $x * $y; $sxx += $x * $x;
@@ -249,8 +274,7 @@ final class WeatherEngine
         if ($steig >= 0) {
             return ['trend' => 1, 'speed' => round($kmh, 1), 'eta' => null];
         }
-        $dNun = (float) $punkte[$n - 1]['d'];
-        $eta  = (int) round($dNun / abs($steig));
+        $eta = (int) round($jetztD / abs($steig));
         return ['trend' => -1, 'speed' => round($kmh, 1),
                 'eta' => ($eta > 0 && $eta <= 180) ? $eta : null];
     }

@@ -45,6 +45,21 @@ final class Observation
         'strikeCount'    => ['Blitze', '', ''],
         'precipType'     => ['Niederschlagsart (Station)', '', ''],
         'batteryV'       => ['Batterie', 'V', '~Volt'],
+        // Landwirtschaftliche Zusatzsensoren der Davis-Reihe. Bodenfeuchte in Zentibar
+        // (0 = nass, 200 = staubtrocken — die Skala laeuft also VERKEHRT herum), Blattfeuchte
+        // auf einer Geraeteskala 0..15. Wer sie nicht hat, bekommt sie auch nicht angelegt.
+        'soilMoist1'     => ['Bodenfeuchte 1', 'cb', 'WX.cb'],
+        'soilMoist2'     => ['Bodenfeuchte 2', 'cb', 'WX.cb'],
+        'soilMoist3'     => ['Bodenfeuchte 3', 'cb', 'WX.cb'],
+        'soilMoist4'     => ['Bodenfeuchte 4', 'cb', 'WX.cb'],
+        'soilTemp1'      => ['Bodentemperatur 1', '°C', '~Temperature'],
+        'soilTemp2'      => ['Bodentemperatur 2', '°C', '~Temperature'],
+        'soilTemp3'      => ['Bodentemperatur 3', '°C', '~Temperature'],
+        'soilTemp4'      => ['Bodentemperatur 4', '°C', '~Temperature'],
+        'leafWet1'       => ['Blattfeuchte 1', '', 'WX.Blatt'],
+        'leafWet2'       => ['Blattfeuchte 2', '', 'WX.Blatt'],
+        'leafWet3'       => ['Blattfeuchte 3', '', 'WX.Blatt'],
+        'leafWet4'       => ['Blattfeuchte 4', '', 'WX.Blatt'],
     ];
 
     /** @var array<string,array{0:float|int|null,1:int}> ident => [Wert, Zeitstempel] */

@@ -33,7 +33,10 @@ final class DavisActData implements IWeatherSource
     private const F_DATUM = 0,  F_ZEIT = 1,  F_DRUCK = 2,  F_T_INNEN = 3, F_RF_INNEN = 4,
                   F_T = 5,      F_WIND = 6,  F_WIND_M = 7, F_WINDRI = 8,  F_RF = 24,
                   F_REGEN_H = 32, F_UV = 33, F_STRAHLUNG = 34, F_REGEN_T = 37,
-                  F_REGEN_M = 38, F_REGEN_J = 39, F_ET_T = 40, F_TREND = 51;
+                  F_REGEN_M = 38, F_REGEN_J = 39, F_ET_T = 40, F_TREND = 51,
+                  // Zusatzsensoren: Bodentemperatur 16..19, Bodenfeuchte 43..46,
+                  // Blattfeuchte 47..50. Nicht angeschlossene Kanaele stehen auf `---`.
+                  F_BODEN_T = 16, F_BODEN_F = 43, F_BLATT_F = 47;
 
     private string $url = '';
     private string $tz = 'UTC';
@@ -129,6 +132,14 @@ final class DavisActData implements IWeatherSource
         $o->set('etDayMm', $this->menge($f, self::F_ET_T), $ts);
         $o->set('uvIndex', $this->zahl($f, self::F_UV), $ts);
         $o->set('radiationWm2', $this->zahl($f, self::F_STRAHLUNG), $ts);
+
+        // Zusatzsensoren: nur was wirklich angeschlossen ist. Ein nicht belegter Kanal
+        // steht auf `---` und wird damit zu null — er taucht dann gar nicht erst auf.
+        for ($k = 0; $k < 4; $k++) {
+            $o->set('soilTemp' . ($k + 1), $this->temp($f, self::F_BODEN_T + $k), $ts);
+            $o->set('soilMoist' . ($k + 1), $this->zahl($f, self::F_BODEN_F + $k), $ts);
+            $o->set('leafWet' . ($k + 1), $this->zahl($f, self::F_BLATT_F + $k), $ts);
+        }
 
         if ($o->leer()) {
             $this->fehler = 'Datei gelesen, aber kein einziger Wert brauchbar';

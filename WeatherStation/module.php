@@ -473,6 +473,18 @@ class WeatherStation extends IPSModule
         }
     }
 
+    /**
+     * Summenwerte, die als ZAEHLER archiviert gehoeren, nicht als Mittelwert.
+     *
+     * Regen und Verdunstung sind aufsummierte Mengen: der Tageswert steigt bis Mitternacht und
+     * faengt dann wieder bei null an. Als Mittelwert archiviert kaeme dabei die durchschnittliche
+     * FUELLHOEHE des Zaehlers heraus — eine Zahl ohne Bedeutung. Als Zaehler bildet Symcon die
+     * Zunahme je Zeitraum, und damit steht in der Stundenaggregation die Regenmenge dieser Stunde.
+     *
+     * Die Regenrate gehoert NICHT dazu: sie ist bereits eine Rate, ihr Mittelwert ist sinnvoll.
+     */
+    private const ZAEHLER = ['RainDay'];
+
     private function applyLogging(): void
     {
         $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
@@ -481,11 +493,23 @@ class WeatherStation extends IPSModule
         }
         foreach (self::LOGGEN as $ident) {
             $vid = @$this->GetIDForIdent($ident);
-            if ($vid && !AC_GetLoggingStatus($aid, $vid)) {
+            if (!$vid) {
+                continue;
+            }
+            if (!AC_GetLoggingStatus($aid, $vid)) {
                 AC_SetLoggingStatus($aid, $vid, true);
             }
+            $zaehler = in_array($ident, self::ZAEHLER, true);
+            if (AC_GetAggregationType($aid, $vid) !== ($zaehler ? 1 : 0)) {
+                AC_SetAggregationType($aid, $vid, $zaehler ? 1 : 0);
+                // Der Ruecksprung auf null um Mitternacht ist ein Zaehler-Neustart und kein
+                // Rueckwaertszaehlen — ohne dieses Kennzeichen entstuende dort ein negativer Sprung.
+                if ($zaehler) {
+                    @AC_SetCounterIgnoreZeros($aid, $vid, true);
+                }
+                @AC_ReAggregateVariable($aid, $vid);
+            }
         }
-        @AC_ReAggregateVariable($aid, 0);
     }
 
     /**

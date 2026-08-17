@@ -238,6 +238,10 @@ class WeatherSource extends IPSModule
     private function applyLogging(Observation $o): void
     {
         static $nicht = ['strikeTime', 'precipType', 'pressureTrend'];
+        // Aufsummierte Mengen gehoeren als ZAEHLER ins Archiv: sie steigen bis zum Stichtag und
+        // beginnen dann wieder bei null. Als Mittelwert waere die Aggregation die durchschnittliche
+        // Fuellhoehe des Zaehlers - eine Zahl ohne Aussage. Als Zaehler ist es die Menge je Zeitraum.
+        static $zaehler = ['rainDayMm', 'rainMonthMm', 'rainYearMm', 'etDayMm'];
         $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
         if (!$aid) {
             return;
@@ -247,8 +251,19 @@ class WeatherSource extends IPSModule
                 continue;
             }
             $vid = @$this->GetIDForIdent('q_' . $ident);
-            if ($vid && !AC_GetLoggingStatus($aid, $vid)) {
+            if (!$vid) {
+                continue;
+            }
+            if (!AC_GetLoggingStatus($aid, $vid)) {
                 AC_SetLoggingStatus($aid, $vid, true);
+            }
+            $istZaehler = in_array($ident, $zaehler, true);
+            if (AC_GetAggregationType($aid, $vid) !== ($istZaehler ? 1 : 0)) {
+                AC_SetAggregationType($aid, $vid, $istZaehler ? 1 : 0);
+                if ($istZaehler) {
+                    @AC_SetCounterIgnoreZeros($aid, $vid, true);
+                }
+                @AC_ReAggregateVariable($aid, $vid);
             }
         }
     }
