@@ -1,0 +1,13 @@
+{
+    "id": "{7C4A1E6D-93B2-4F58-A0D7-2E51C8B4A9F3}",
+    "name": "WeatherStation",
+    "type": 3,
+    "vendor": "Hoep",
+    "aliases": ["Wetter", "WeatherStation", "Nebel", "Gewitter", "Wetterlage"],
+    "url": "https://github.com/hoep/SymconWeatherStation",
+    "prefix": "WX",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "hidden": false
+}

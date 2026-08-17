@@ -1,0 +1,13 @@
+{
+    "id": "{B24C7F1E-9A05-4E63-8D17-3F92C6B0A5D8}",
+    "name": "WeatherSource",
+    "type": 3,
+    "vendor": "Hoep",
+    "aliases": ["Wetterquelle", "WeatherSource", "Davis", "Tempest", "Wetterstation"],
+    "url": "https://github.com/hoep/SymconWeatherStation",
+    "prefix": "WXS",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "hidden": false
+}
