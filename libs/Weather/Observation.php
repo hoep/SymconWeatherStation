@@ -52,6 +52,28 @@ final class Observation
         // Landwirtschaftliche Zusatzsensoren der Davis-Reihe. Bodenfeuchte in Zentibar
         // (0 = nass, 200 = staubtrocken — die Skala laeuft also VERKEHRT herum), Blattfeuchte
         // auf einer Geraeteskala 0..15. Wer sie nicht hat, bekommt sie auch nicht angelegt.
+        // --- Zusatzkanaele der Davis-Reihe -------------------------------------
+        // Die Station fuehrt sieben freie Temperatur- und Feuchtekanaele sowie je vier
+        // fuer Boden und Blatt. Belegt ist davon fast nie alles; was nicht angeschlossen
+        // ist, kommt als null herein und bekommt gar keine Variable.
+        'extraTemp1'     => ['Zusatztemperatur 1', '°C', '~Temperature'],
+        'extraTemp2'     => ['Zusatztemperatur 2', '°C', '~Temperature'],
+        'extraTemp3'     => ['Zusatztemperatur 3', '°C', '~Temperature'],
+        'extraTemp4'     => ['Zusatztemperatur 4', '°C', '~Temperature'],
+        'extraTemp5'     => ['Zusatztemperatur 5', '°C', '~Temperature'],
+        'extraTemp6'     => ['Zusatztemperatur 6', '°C', '~Temperature'],
+        'extraTemp7'     => ['Zusatztemperatur 7', '°C', '~Temperature'],
+        'extraHum1'      => ['Zusatzfeuchte 1', '%', '~Humidity.F'],
+        'extraHum2'      => ['Zusatzfeuchte 2', '%', '~Humidity.F'],
+        'extraHum3'      => ['Zusatzfeuchte 3', '%', '~Humidity.F'],
+        'extraHum4'      => ['Zusatzfeuchte 4', '%', '~Humidity.F'],
+        'extraHum5'      => ['Zusatzfeuchte 5', '%', '~Humidity.F'],
+        'extraHum6'      => ['Zusatzfeuchte 6', '%', '~Humidity.F'],
+        'extraHum7'      => ['Zusatzfeuchte 7', '%', '~Humidity.F'],
+        'leafTemp1'      => ['Blatttemperatur 1', '°C', '~Temperature'],
+        'leafTemp2'      => ['Blatttemperatur 2', '°C', '~Temperature'],
+        'leafTemp3'      => ['Blatttemperatur 3', '°C', '~Temperature'],
+        'leafTemp4'      => ['Blatttemperatur 4', '°C', '~Temperature'],
         'soilMoist1'     => ['Bodenfeuchte 1', 'cb', 'WX.cb'],
         'soilMoist2'     => ['Bodenfeuchte 2', 'cb', 'WX.cb'],
         'soilMoist3'     => ['Bodenfeuchte 3', 'cb', 'WX.cb'],

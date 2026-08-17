@@ -37,12 +37,17 @@ final class DavisActData implements IWeatherSource
                   // Zusatzsensoren: Bodentemperatur 16..19, Bodenfeuchte 43..46,
                   // Blattfeuchte 47..50. Nicht angeschlossene Kanaele stehen auf `---`.
                   F_BODEN_T = 16, F_BODEN_F = 43, F_BLATT_F = 47,
-                  F_REGEN_LETZT = 35, F_ET_M = 41, F_ET_J = 42, F_VORHERSAGE = 70;
+                  F_REGEN_LETZT = 35, F_ET_M = 41, F_ET_J = 42, F_VORHERSAGE = 70,
+                  // Freie Zusatzkanaele: sieben Temperaturen (9..15), sieben Feuchten (25..31),
+                  // je vier fuer Boden- und Blatttemperatur (16..19, 20..23).
+                  F_EXTRA_T = 9, F_EXTRA_F = 25, F_BLATT_T = 20;
 
     private string $url = '';
     private string $tz = 'UTC';
     private bool   $imperial = false;
     private int    $timeout = 5;
+    /** @var array<int,string> Kanaele, die trotz Wert nicht uebernommen werden sollen. */
+    private array  $ignoriert = [];
     private string $fehler = '';
 
     public static function id(): string
@@ -68,6 +73,10 @@ final class DavisActData implements IWeatherSource
              'default' => false,
              'hint' => 'Nur setzen, wenn die Steuersoftware auf angelsaechsische Einheiten steht.'],
             ['name' => 'Timeout', 'caption' => 'Zeitgrenze (Sekunden)', 'type' => 'Integer', 'default' => 5],
+            ['name' => 'Ignore', 'caption' => 'Kanäle übergehen (Kennungen, durch Komma getrennt)',
+             'type' => 'String', 'default' => '',
+             'hint' => 'Für Kanäle, die eine feste 0 melden, obwohl nichts angeschlossen ist — '
+                     . 'z. B. leafWet4. Der Probelauf zeigt die Kennungen.'],
         ];
     }
 
@@ -77,6 +86,8 @@ final class DavisActData implements IWeatherSource
         $this->tz       = trim((string) ($config['Timezone'] ?? 'UTC')) ?: 'UTC';
         $this->imperial = (bool) ($config['Imperial'] ?? false);
         $this->timeout  = max(2, (int) ($config['Timeout'] ?? 5));
+        $this->ignoriert = array_values(array_filter(array_map(
+            'trim', explode(',', (string) ($config['Ignore'] ?? '')))));
     }
 
     public function lastError(): string
@@ -138,12 +149,27 @@ final class DavisActData implements IWeatherSource
         $o->set('uvIndex', $this->zahl($f, self::F_UV), $ts);
         $o->set('radiationWm2', $this->zahl($f, self::F_STRAHLUNG), $ts);
 
-        // Zusatzsensoren: nur was wirklich angeschlossen ist. Ein nicht belegter Kanal
-        // steht auf `---` und wird damit zu null — er taucht dann gar nicht erst auf.
+        // Zusatzkanaele: nur was wirklich angeschlossen ist. Ein nicht belegter Kanal steht
+        // auf `---` und wird damit zu null — er taucht dann gar nicht erst auf, und es entsteht
+        // auch keine Variable dafuer.
+        for ($k = 0; $k < 7; $k++) {
+            $o->set('extraTemp' . ($k + 1), $this->temp($f, self::F_EXTRA_T + $k), $ts);
+            $o->set('extraHum' . ($k + 1), $this->zahl($f, self::F_EXTRA_F + $k), $ts);
+        }
         for ($k = 0; $k < 4; $k++) {
             $o->set('soilTemp' . ($k + 1), $this->temp($f, self::F_BODEN_T + $k), $ts);
+            $o->set('leafTemp' . ($k + 1), $this->temp($f, self::F_BLATT_T + $k), $ts);
             $o->set('soilMoist' . ($k + 1), $this->zahl($f, self::F_BODEN_F + $k), $ts);
             $o->set('leafWet' . ($k + 1), $this->zahl($f, self::F_BLATT_F + $k), $ts);
+        }
+
+        // Manche Kanaele melden eine feste 0 statt `---`, obwohl gar nichts angeschlossen ist —
+        // die Steuersoftware unterscheidet das nicht durchgaengig. Automatisch aussortieren
+        // laesst sich das nicht: eine dauerhafte 0 kann auf einer anderen Anlage "trocken"
+        // heissen, und ein Modul, das Sensoren eigenmaechtig fuer tot erklaert, ist schlimmer
+        // als ein Wert zu viel. Deshalb von Hand.
+        foreach ($this->ignoriert as $ident) {
+            $o->remove($ident);
         }
 
         if ($o->leer()) {
