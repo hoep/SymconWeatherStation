@@ -34,7 +34,7 @@ class WeatherStation extends IPSModule
                             'FogLevel', 'FogPct', 'FogFSI', 'PrecipType', 'StormLevel', 'StormDist',
                             'StormRate', 'StormTrend', 'StormSpeed', 'StormEta', 'StormApproaching',
                             'SightPct', 'SnowCover', 'Condition',
-                            'AppTemp', 'AbsHum', 'TempDamped', 'TempMin', 'TempMax',
+                            'AppTemp', 'AbsHum', 'TempDamped', 'TempMin', 'TempMax', 'RainTotal',
                             'WindMin', 'WindMax'];
 
     public function Create()
@@ -49,6 +49,7 @@ class WeatherStation extends IPSModule
         $this->RegisterPropertyBoolean('UseCameras', true);
         $this->RegisterPropertyBoolean('Logging', true);
         $this->RegisterPropertyInteger('DampMinutes', 15);   // Fenster der gedaempften Temperatur
+        $this->RegisterPropertyFloat('RainTotalStart', 0.0); // Startwert des Gesamtzaehlers (mm)
 
         $this->RegisterPropertyFloat('FogHum', WE::STD['fogHum']);
         $this->RegisterPropertyFloat('FogWind', WE::STD['fogWind']);
@@ -73,6 +74,7 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableFloat('Pressure', 'Luftdruck', $this->prof('~AirPressure.F'), 16);
         $this->RegisterVariableFloat('RainRate', 'Regenrate', 'WX.Regenrate', 17);
         $this->RegisterVariableFloat('RainDay', 'Regen heute', $this->prof('~Rainfall'), 18);
+        $this->RegisterVariableFloat('RainTotal', 'Regen kumuliert', 'WX.mm', 19);
         $this->RegisterVariableFloat('Radiation', 'Globalstrahlung', 'WX.Strahlung', 19);
         $this->RegisterVariableFloat('UV', 'UV-Index', $this->prof('~UVIndex'), 20);
 
@@ -132,6 +134,7 @@ class WeatherStation extends IPSModule
         $this->RegisterAttributeString('StrikeRing', '[]');
         $this->RegisterAttributeString('Upper', '{}');
         $this->RegisterAttributeString('Damp', '[]');
+        $this->RegisterAttributeFloat('RainDayLast', -1.0);
 
         $this->RegisterTimer('Tick', 0, 'WX_Update($_IPS[\'TARGET\']);');
     }
@@ -190,6 +193,7 @@ class WeatherStation extends IPSModule
         $this->put('Pressure', $o->num('pressureHpa'));
         $this->put('RainRate', $o->num('rainRateMmH'));
         $this->put('RainDay', $o->num('rainDayMm'));
+        $this->regenGesamt($o->num('rainDayMm'));
         $this->put('Radiation', $o->num('radiationWm2'));
         $this->put('UV', $o->num('uvIndex'));
 
@@ -506,6 +510,43 @@ class WeatherStation extends IPSModule
     }
 
     /**
+     * Fortlaufender Gesamtregen ueber Jahre.
+     *
+     * Keine Station liefert ihn — sie kennt Tag, Monat und Jahr, und alle drei springen zum
+     * Stichtag auf null. Gezaehlt wird deshalb die ZUNAHME des Tageswertes: steigt er, kommt
+     * die Differenz dazu; faellt er (Mitternacht), ist der neue Tageswert selbst die Zunahme.
+     *
+     * Bewusst OHNE Archivabfrage. Die alte Loesung las die beiden juengsten Archivwerte und
+     * bildete deren Differenz — das zaehlt doppelt, wenn das Skript oefter laeuft als
+     * aufgezeichnet wird, und verliert Regen, wenn es seltener laeuft. Ein gemerkter letzter
+     * Wert kennt diese Abhaengigkeit nicht.
+     *
+     * Der Startwert im Formular uebernimmt einen vorhandenen Zaehlerstand, damit die Reihe
+     * nicht bei null neu beginnt.
+     */
+    private function regenGesamt(?float $tag): void
+    {
+        if ($tag === null) {
+            return;
+        }
+        $vorher = $this->ReadAttributeFloat('RainDayLast');
+        $this->WriteAttributeFloat('RainDayLast', $tag);
+
+        $stand = (float) $this->GetValue('RainTotal');
+        if ($stand <= 0.0) {
+            $stand = (float) $this->ReadPropertyFloat('RainTotalStart');
+        }
+        if ($vorher < 0.0) {
+            $this->SetValue('RainTotal', round($stand, 2));   // erster Lauf: nur uebernehmen
+            return;
+        }
+        $zu = ($tag >= $vorher) ? ($tag - $vorher) : $tag;     // sonst Tageswechsel
+        if ($zu > 0.0) {
+            $this->SetValue('RainTotal', round($stand + $zu, 2));
+        }
+    }
+
+    /**
      * Gedaempfte Aussentemperatur: gleitender Mittelwert ueber ein Zeitfenster.
      *
      * Beschattung und Heizung sollen nicht auf jede Boe und jede Wolke reagieren. Die alte
@@ -576,16 +617,18 @@ class WeatherStation extends IPSModule
     }
 
     /**
-     * Summenwerte, die als ZAEHLER archiviert gehoeren, nicht als Mittelwert.
+     * Was als ZAEHLER archiviert gehoert — und was ausdruecklich nicht.
      *
-     * Regen und Verdunstung sind aufsummierte Mengen: der Tageswert steigt bis Mitternacht und
-     * faengt dann wieder bei null an. Als Mittelwert archiviert kaeme dabei die durchschnittliche
-     * FUELLHOEHE des Zaehlers heraus — eine Zahl ohne Bedeutung. Als Zaehler bildet Symcon die
-     * Zunahme je Zeitraum, und damit steht in der Stundenaggregation die Regenmenge dieser Stunde.
+     * Zaehler ist NUR der fortlaufende Gesamtregen: er steigt und faellt nie. Genau darauf ist
+     * die Zaehler-Aggregation ausgelegt, sie bildet die Zunahme je Zeitraum.
      *
-     * Die Regenrate gehoert NICHT dazu: sie ist bereits eine Rate, ihr Mittelwert ist sinnvoll.
+     * "Regen heute" gehoert NICHT dazu, auch wenn es verlockend aussieht. Der Wert faellt jede
+     * Nacht auf null zurueck; als Zaehler archiviert waere er eine Reihe aus Zunahmen mit einem
+     * taeglichen Bruch, und der Tageswert selbst — die Zahl, die man eigentlich sehen will —
+     * ginge in der Aggregation verloren. Dasselbe gilt fuer Monat, Jahr und Verdunstung.
+     * Die Regenrate ist ohnehin schon eine Rate.
      */
-    private const ZAEHLER = ['RainDay'];
+    private const ZAEHLER = ['RainTotal'];
 
     private function applyLogging(): void
     {
@@ -782,6 +825,11 @@ class WeatherStation extends IPSModule
                 ]],
             ]],
 
+            ['type' => 'NumberSpinner', 'name' => 'RainTotalStart',
+             'caption' => 'Startwert Regen kumuliert (mm)', 'digits' => 2],
+            ['type' => 'Label', 'caption' => 'Der fortlaufende Gesamtregen zählt die Zunahme des '
+                . 'Tageswertes. Wer schon einen Zählerstand hat, trägt ihn hier ein, damit die Reihe '
+                . 'nicht bei null neu beginnt.'],
             ['type' => 'NumberSpinner', 'name' => 'DampMinutes',
              'caption' => 'Fenster der gedämpften Temperatur (Minuten)', 'minimum' => 1, 'maximum' => 180],
             ['type' => 'Label', 'caption' => 'Die gedämpfte Außentemperatur glättet über dieses Fenster. '

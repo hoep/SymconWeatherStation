@@ -238,10 +238,10 @@ class WeatherSource extends IPSModule
     private function applyLogging(Observation $o): void
     {
         static $nicht = ['strikeTime', 'precipType', 'pressureTrend'];
-        // Aufsummierte Mengen gehoeren als ZAEHLER ins Archiv: sie steigen bis zum Stichtag und
-        // beginnen dann wieder bei null. Als Mittelwert waere die Aggregation die durchschnittliche
-        // Fuellhoehe des Zaehlers - eine Zahl ohne Aussage. Als Zaehler ist es die Menge je Zeitraum.
-        static $zaehler = ['rainDayMm', 'rainMonthMm', 'rainYearMm', 'etDayMm'];
+        // KEINE Zaehler hier. Tages-, Monats- und Jahresmenge springen zum Stichtag auf null
+        // zurueck; als Zaehler archiviert ginge genau der Wert verloren, den man sehen will.
+        // Der einzige echte Zaehler ist der fortlaufende Gesamtregen, und den fuehrt die Station.
+        static $zaehler = [];
         $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
         if (!$aid) {
             return;
