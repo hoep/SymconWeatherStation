@@ -1,0 +1,13 @@
+{
+    "id": "{5F8C21D4-6A7B-4E90-B3C2-8D14E7F6A2B9}",
+    "name": "TempestListener",
+    "type": 3,
+    "vendor": "Hoep",
+    "aliases": ["Tempest UDP", "TempestListener", "WeatherFlow"],
+    "url": "https://github.com/hoep/SymconWeatherStation",
+    "prefix": "WXT",
+    "parentRequirements": ["{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}"],
+    "childRequirements": [],
+    "implemented": ["{018EF6B5-AB94-40C6-AA53-46943E824ACF}"],
+    "hidden": false
+}

@@ -239,8 +239,9 @@ class WeatherStation extends IPSModule
         foreach ($kam['liste'] as $c) {
             $z .= isset($c['fehler'])
                 ? sprintf("  %-16s %s\n", $c['name'], $c['fehler'])
-                : sprintf("  %-16s Kontrast %6s von %6s  =  Sicht %3d %%   (%s)\n",
-                          $c['name'], $c['kontrast'], $c['klarwert'], $c['sicht'], $c['zeit']);
+                : sprintf("  %-16s Dichte %7s von %7s  =  Sicht %3d %%   (Kontrast %s, Helligkeit %s, %s)\n",
+                          $c['name'], $c['dichte'], $c['klarwert'], $c['sicht'],
+                          $c['kontrast'], $c['helligkeit'], $c['zeit']);
         }
         return $z . sprintf("\nNebel      %d   %s\nGewitter   %d   %s\nBewölkung  %s   %s\n"
                           . "Nieders.   %s\nWetterlage %s\n",

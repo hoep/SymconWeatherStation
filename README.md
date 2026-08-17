@@ -21,6 +21,7 @@ Fällt die erste Station aus, rückt die zweite von selbst nach.
 |---|---|---|
 | `davis-actdata` | `actData.txt` der Eusotec-/Eusoport-Software | ja, im Dauerbetrieb |
 | `davis-wll` | Davis WeatherLink Live, `/v1/current_conditions` | nein, nach Gerätebeschreibung |
+| `tempest-udp` | die Tempest direkt, UDP-Broadcast Port 50222 | ja, im Dauerbetrieb |
 | `tempest-module` | Variablen eines vorhandenen Tempest-Moduls | ja, im Dauerbetrieb |
 | `open-meteo` | Vorhersagemodell, ohne eigene Station | ja |
 | `bound-variables` | beliebige vorhandene Symcon-Variablen | ja |
@@ -30,6 +31,23 @@ Jede Quelle liefert dieselbe normierte Beobachtung: Grad C, km/h, hPa, mm, mm/h,
 und nicht `0`. Beides ist keine Förmelei: ohne eigene Zeitstempel lässt sich eine
 eingefrorene Quelle nicht erkennen, und eine Station ohne Strahlungssensor meldete sonst
 dauerhaft „bedeckt".
+
+## Die Tempest direkt hören
+
+Das Modul **TempestListener** hängt sich als Kind an einen UDP-Socket auf Port 50222 und liest
+die Sätze der Station unmittelbar mit — ohne Cloud, ohne Konto, ohne fremdes Modul. Mehrere
+Zuhörer stören einander nicht: ein Socket darf mehrere Kinder haben, und ein Broadcast erreicht
+sie alle. Ein vorhandenes Tempest-Modul kann unverändert weiterlaufen.
+
+Der Gewinn ist nicht die Unabhängigkeit, sondern die **Auflösung**:
+
+- **Jeder Blitz einzeln.** Die Station sendet für jeden Schlag ein eigenes `evt_strike` mit
+  eigenem Zeitpunkt und eigener Entfernung. Wer stattdessen Sammelvariablen liest, bekommt
+  einen Zähler je Minute und eine mittlere Entfernung — damit lässt sich ein einzelner Blitz
+  in 30 km nicht von einer Zellenpassage über dem Haus unterscheiden. Genau das ist aber die
+  Gewitterlage.
+- **Wind im Drei-Sekunden-Takt** statt im Minutenmittel. Für Beschattung und Markisenschutz ist
+  das der Unterschied zwischen rechtzeitig und zu spät.
 
 ## Was abgeleitet wird
 

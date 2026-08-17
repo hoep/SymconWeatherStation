@@ -17,6 +17,7 @@ final class SourceFactory
     private const KATALOG = [
         Drivers\DavisActData::class,
         Drivers\DavisWeatherLinkLive::class,
+        Drivers\TempestUdp::class,
         Drivers\TempestModule::class,
         Drivers\OpenMeteo::class,
         Drivers\BoundVariables::class,

@@ -18,6 +18,7 @@ foreach ([
     'Drivers/DavisActData.php',
     'Drivers/DavisWeatherLinkLive.php',
     'Drivers/TempestModule.php',
+    'Drivers/TempestUdp.php',
     'Drivers/OpenMeteo.php',
     'Drivers/BoundVariables.php',
     'SourceFactory.php',
