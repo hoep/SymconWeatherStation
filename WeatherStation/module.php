@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../libs/Weather/autoload.php';
 
 use Hoep\Weather\Engines\CameraVision;
+use Hoep\Weather\Engines\Forecast;
 use Hoep\Weather\Engines\Meteo;
 use Hoep\Weather\Engines\StationCodes;
 use Hoep\Weather\Engines\UpperAir;
@@ -26,22 +27,41 @@ use Hoep\Weather\Observation;
  */
 class WeatherStation extends IPSModule
 {
-    private const GUID_SOURCE = '{B24C7F1E-9A05-4E63-8D17-3F92C6B0A5D8}';
+    private const GUID_SOURCE   = '{B24C7F1E-9A05-4E63-8D17-3F92C6B0A5D8}';
+    /**
+     * Ein Empfaenger, der schon selbst eine vollstaendige Beobachtung liefert, darf DIREKT als
+     * Quelle stehen. Sonst braeuchte es eine WeatherSource-Instanz, die nichts weiter taete als
+     * durchzureichen — eine Instanz mehr im Baum ohne eigene Aufgabe.
+     *
+     * Warum es die Trennung ueberhaupt gibt: wer UDP empfaengt, MUSS Kind eines Sockets sein.
+     * Die allgemeine Quelle darf das nicht, sie liest auch HTTP-Stationen und Variablen. Ein
+     * Empfaenger ist also ein Sonderfall, keine Doppelung.
+     */
+    private const GUID_LISTENER = '{5F8C21D4-6A7B-4E90-B3C2-8D14E7F6A2B9}';
 
     /** Variablen, die als Messreihe etwas taugen — nur die werden archiviert. */
     private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'Wind', 'WindAvg', 'Gust', 'WindDir',
-                            'Pressure', 'RainRate', 'RainDay', 'Radiation', 'UV', 'CloudPct',
+                            'Pressure', 'RainRate', 'RainDay', 'RainMonth', 'RainYear', 'RainLast',
+                            'EtDay', 'EtMonth', 'EtYear', 'EtTotal', 'TempIn', 'HumIn', 'Battery',
+                            'Radiation', 'Illuminance', 'UV', 'CloudPct',
                             'FogLevel', 'FogPct', 'FogFSI', 'PrecipType', 'StormLevel', 'StormDist',
                             'StormRate', 'StormTrend', 'StormSpeed', 'StormEta', 'StormApproaching',
                             'SightPct', 'SnowCover', 'Condition',
                             'AppTemp', 'AbsHum', 'TempDamped', 'TempMin', 'TempMax', 'RainTotal',
-                            'WindMin', 'WindMax'];
+                            'WindMin', 'WindMax', 'Sunshine', 'SunshineToday', 'RainDetected'];
 
     public function Create()
     {
         parent::Create();
 
         $this->RegisterPropertyInteger('Interval', 60);
+        // Auf jede Quell-Aktualisierung reagieren, statt nur im Takt zu rechnen. Die Quellen
+        // lesen ihre Station selbst (Davis alle 5 s, Tempest laufend); der Takt oben bleibt als
+        // Sicherheitsnetz, falls eine Quelle verstummt.
+        $this->RegisterPropertyBoolean('OnSourceUpdate', true);
+        $this->RegisterPropertyInteger('MinGapSeconds', 5);    // kuerzester Abstand zweier Laeufe
+        $this->RegisterPropertyInteger('CameraSeconds', 60);   // Bildauswertung hoechstens so oft
+        $this->RegisterPropertyInteger('DayValueSeconds', 60); // Tages-Min/Max hoechstens so oft
         $this->RegisterPropertyFloat('Lat', 0.0);
         $this->RegisterPropertyFloat('Lon', 0.0);
         $this->RegisterPropertyString('Sources', '[]');   // [{InstanceID,Priority,MaxAge,Enabled}]
@@ -49,7 +69,17 @@ class WeatherStation extends IPSModule
         $this->RegisterPropertyBoolean('UseCameras', true);
         $this->RegisterPropertyBoolean('Logging', true);
         $this->RegisterPropertyInteger('DampMinutes', 15);   // Fenster der gedaempften Temperatur
+        $this->RegisterPropertyBoolean('UseForecast', true); // Vorhersage von Open-Meteo holen
+        $this->RegisterPropertyInteger('ForecastMinutes', 30);
+        $this->RegisterPropertyInteger('ForecastDays', 7);
         $this->RegisterPropertyFloat('RainTotalStart', 0.0); // Startwert des Gesamtzaehlers (mm)
+        $this->RegisterPropertyFloat('EtTotalStart', 0.0);   // Startwert des Verdunstungszaehlers (mm)
+        // Optischer Regensensor: ein Boolean, der "es ist nass" meldet. Er misst keine Menge,
+        // spricht dafuer sofort an - die Messwippe der Station braucht rund 0,2 mm. Ohne ihn
+        // stand die Wetterlage bei Nieselregen minutenlang auf "bedeckt".
+        $this->RegisterPropertyInteger('RainSensorId', 0);
+        $this->RegisterPropertyInteger('RainSensor2Id', 0);   // zweite Meinung, nachrangig
+        $this->RegisterPropertyInteger('RainSensorMaxAge', 3600);
 
         $this->RegisterPropertyFloat('FogHum', WE::STD['fogHum']);
         $this->RegisterPropertyFloat('FogWind', WE::STD['fogWind']);
@@ -77,6 +107,26 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableFloat('RainTotal', 'Regen kumuliert', 'WX.mm', 19);
         $this->RegisterVariableFloat('Radiation', 'Globalstrahlung', 'WX.Strahlung', 19);
         $this->RegisterVariableFloat('UV', 'UV-Index', $this->prof('~UVIndex'), 20);
+        // Beleuchtungsstaerke: was das AUGE sieht, nicht was die Solarzelle bekommt. Sie ist
+        // deshalb der natuerlichere Massstab fuer Helligkeitsschwellen (Beschattung, Licht)
+        // als die Globalstrahlung - die Tempest misst beides getrennt.
+        $this->RegisterVariableFloat('Illuminance', 'Beleuchtungsstärke', $this->prof('~Illumination'), 20);
+
+        // --- Weitere Groessen, die die Quellen liefern ---
+        $this->RegisterVariableFloat('RainMonth', 'Regen Monat', $this->prof('~Rainfall'), 18);
+        $this->RegisterVariableFloat('RainYear', 'Regen Jahr', $this->prof('~Rainfall'), 18);
+        $this->RegisterVariableFloat('RainLast', 'Letzter Regen', $this->prof('~Rainfall'), 18);
+        // Verdunstung (Evapotranspiration): wie viel Wasser Boden und Pflanzen abgeben. Die
+        // Station rechnet sie aus Strahlung, Temperatur, Feuchte und Wind. Fuer die Bewaesserung
+        // ist sie die Gegengroesse zum Regen - erst beide zusammen ergeben die Bilanz.
+        $this->RegisterVariableFloat('EtDay', 'Verdunstung heute', $this->prof('~Rainfall'), 19);
+        $this->RegisterVariableFloat('EtMonth', 'Verdunstung Monat', $this->prof('~Rainfall'), 19);
+        $this->RegisterVariableFloat('EtYear', 'Verdunstung Jahr', $this->prof('~Rainfall'), 19);
+        $this->RegisterVariableFloat('EtTotal', 'Verdunstung kumuliert', 'WX.mm', 19);
+        $this->RegisterVariableFloat('TempIn', 'Innentemperatur', $this->prof('~Temperature'), 21);
+        $this->RegisterVariableFloat('HumIn', 'Innenfeuchte', $this->prof('~Humidity.F'), 21);
+        $this->RegisterVariableFloat('PressureTrend', 'Luftdrucktendenz (Zahl)', '', 25);
+        $this->RegisterVariableFloat('Battery', 'Batteriespannung', $this->prof('~Volt'), 90);
 
         $this->RegisterVariableFloat('AppTemp', 'Gefühlte Temperatur', $this->prof('~Temperature'), 21);
         $this->RegisterVariableFloat('AbsHum', 'Absolute Feuchte', 'WX.AbsFeuchte', 22);
@@ -126,7 +176,15 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableFloat('SunAzimuth', 'Sonnenazimut', '', 61);
         $this->RegisterVariableFloat('MoonIllum', 'Mond beleuchtet', '~Intensity.100', 62);
         $this->RegisterVariableBoolean('IsNight', 'Nacht', '', 63);
+        // Sonnenschein: die Entscheidung gehoert hierher, nicht in ein Anzeigeskript. Sie
+        // braucht Sonnenhoehe und Globalstrahlung - beides rechnet bzw. misst dieses Modul.
+        $this->RegisterVariableBoolean('Sunshine', 'Sonnenschein', '', 64);
+        $this->RegisterVariableFloat('SunThreshold', 'Sonnenschein · Schwelle', 'WX.Strahlung', 65);
+        $this->RegisterVariableFloat('SunshineToday', 'Sonnenschein heute', 'WX.Stunden', 66);
+        $this->RegisterVariableBoolean('RainDetected', 'Regen (Sensor)', '', 18);
         $this->RegisterVariableInteger('DataAge', 'Alter der Messwerte (s)', '', 70);
+        $this->RegisterVariableString('Forecast', 'Vorhersage (JSON)', '', 68);
+        $this->RegisterVariableInteger('ForecastAge', 'Vorhersage geholt', '~UnixTimestamp', 69);
         $this->RegisterVariableString('SourceMap', 'Herkunft je Größe (JSON)', '', 71);
         $this->RegisterVariableInteger('LastRun', 'Letzte Auswertung', '~UnixTimestamp', 72);
 
@@ -135,6 +193,11 @@ class WeatherStation extends IPSModule
         $this->RegisterAttributeString('Upper', '{}');
         $this->RegisterAttributeString('Damp', '[]');
         $this->RegisterAttributeFloat('RainDayLast', -1.0);
+        $this->RegisterAttributeFloat('EtDayLast', -1.0);
+        $this->RegisterAttributeInteger('SunshineLast', 0);   // Zeitpunkt der letzten Sonnenschein-Auswertung
+        $this->RegisterAttributeInteger('LastRun', 0);        // Entprellung der Quell-Ereignisse
+        $this->RegisterAttributeString('CamCache', '{}');     // letzte Kameraauswertung samt Zeitpunkt
+        $this->RegisterAttributeInteger('DayTs', 0);          // letzte Tageswert-Berechnung
 
         $this->RegisterTimer('Tick', 0, 'WX_Update($_IPS[\'TARGET\']);');
     }
@@ -145,10 +208,71 @@ class WeatherStation extends IPSModule
         $this->maybeProfiles();
         $iv = max(0, $this->ReadPropertyInteger('Interval'));
         $this->SetTimerInterval('Tick', $iv * 1000);
+        $this->quellenAbonnieren();
         if ($this->ReadPropertyBoolean('Logging')) {
             $this->applyLogging();
         }
         $this->SetStatus($this->quellen() === [] ? 201 : 102);
+    }
+
+    /**
+     * Auf die Quellen hoeren, statt auf die Uhr zu schauen.
+     *
+     * Jede Quelle stempelt bei jedem gelungenen Lesen eine Variable: die allgemeine Quelle
+     * "Zuletzt gelesen" (LastRead), der UDP-Empfaenger seine Beobachtung (Data). Wer darauf
+     * lauscht, rechnet genau dann neu, wenn es etwas Neues GIBT - und nicht 59 Sekunden
+     * spaeter. Der Zeittakt bleibt als Sicherheitsnetz bestehen: verstummt eine Quelle, laeuft
+     * die Ableitung trotzdem weiter (Sonnenstand, Mond, Tageswechsel haengen nicht an ihr).
+     */
+    private function quellenAbonnieren(): void
+    {
+        $will = [];
+        if ($this->ReadPropertyBoolean('OnSourceUpdate')) {
+            foreach ($this->quellen() as $q) {
+                $iid = (int) $q['InstanceID'];
+                if ($iid <= 0 || !@IPS_InstanceExists($iid)) {
+                    continue;
+                }
+                foreach (['LastRead', 'Data'] as $ident) {
+                    $vid = @IPS_GetObjectIDByIdent($ident, $iid);
+                    if ($vid) {
+                        $will[$vid] = true;
+                        break;          // eine Variable je Quelle genuegt
+                    }
+                }
+            }
+        }
+        $hat = [];
+        foreach ($this->GetMessageList() as $sid => $msgs) {
+            foreach ($msgs as $m) {
+                if ($m === VM_UPDATE) {
+                    $hat[(int) $sid] = true;
+                }
+            }
+        }
+        foreach (array_keys($will) as $vid) {
+            if (!isset($hat[$vid])) {
+                $this->RegisterMessage($vid, VM_UPDATE);
+            }
+        }
+        foreach (array_keys($hat) as $vid) {
+            if (!isset($will[$vid])) {
+                $this->UnregisterMessage($vid, VM_UPDATE);
+            }
+        }
+    }
+
+    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    {
+        if ($Message !== VM_UPDATE) {
+            return;
+        }
+        // Entprellen: zwei Quellen, die im selben Moment lesen, sollen EINEN Lauf ausloesen.
+        $gap = max(1, $this->ReadPropertyInteger('MinGapSeconds'));
+        if (time() - $this->ReadAttributeInteger('LastRun') < $gap) {
+            return;
+        }
+        $this->Update();
     }
 
     // ==================================================================
@@ -157,6 +281,7 @@ class WeatherStation extends IPSModule
 
     public function Update(): void
     {
+        $this->WriteAttributeInteger('LastRun', time());
         [$o, $herkunft] = $this->zusammenfuehren();
         $lat = $this->ReadPropertyFloat('Lat');
         $lon = $this->ReadPropertyFloat('Lon');
@@ -179,7 +304,8 @@ class WeatherStation extends IPSModule
         $gew = WE::gewitter($o, $this->ringMitQuellen(), $cfg);
         $this->WriteAttributeString('StrikeRing', json_encode($gew['ring']));
         $wol = WE::bewoelkung($o, $lat, $lon);
-        $ns  = WE::niederschlag($o);
+        $nass = $this->regenSensor();
+        $ns  = WE::niederschlag($o, $nass);
 
         // Messwerte durchreichen — nur, was auch da ist. Fehlt eine Groesse, bleibt die
         // Variable auf ihrem letzten Wert statt auf einer erfundenen Null.
@@ -195,6 +321,18 @@ class WeatherStation extends IPSModule
         $this->put('RainDay', $o->num('rainDayMm'));
         $this->regenGesamt($o->num('rainDayMm'));
         $this->put('Radiation', $o->num('radiationWm2'));
+        $this->put('Illuminance', $o->num('illuminanceLux'));
+        $this->put('RainMonth', $o->num('rainMonthMm'));
+        $this->put('RainYear', $o->num('rainYearMm'));
+        $this->put('RainLast', $o->num('rainLastMm'));
+        $this->put('EtDay', $o->num('etDayMm'));
+        $this->put('EtMonth', $o->num('etMonthMm'));
+        $this->put('EtYear', $o->num('etYearMm'));
+        $this->put('TempIn', $o->num('tempInC'));
+        $this->put('HumIn', $o->num('humInPct'));
+        $this->put('PressureTrend', $o->num('pressureTrend'));
+        $this->put('Battery', $o->num('batteryV'));
+        $this->summe('EtTotal', 'EtDayLast', 'EtTotalStart', $o->num('etDayMm'));
         $this->put('UV', $o->num('uvIndex'));
 
         // Gefuehlte Temperatur, absolute Feuchte, Daempfung und die Klartexte.
@@ -216,6 +354,7 @@ class WeatherStation extends IPSModule
 
         $this->put('WetBulb', $ns['twet']);
         $this->SetValue('PrecipType', $ns['art']);
+        $this->SetValue('RainDetected', $nass === true);
         $this->SetValue('FogLevel', $neb['stufe']);
         $this->SetValue('FogFSI', (float) ($neb['fsi'] ?? 0.0));
         // Nebel als DICHTE in Prozent — dafuer, dass Anzeigen eine stetige Groesse brauchen.
@@ -224,7 +363,16 @@ class WeatherStation extends IPSModule
         $this->SetValue('FogPct', $kamera['sicht'] !== null
             ? round(max(0.0, 100.0 - $kamera['sicht']), 1)
             : (float) [0, 25, 60, 90][$neb['stufe']]);
-        $this->SetValue('FogText', $neb['text']);
+        // Die Streuung der Kameras gehoert in die Begruendung: sie zeigt, ob eine einzelne
+        // Kamera abweicht (Linse, Gegenlicht, alter Klarwert) oder ob es wirklich zuzieht.
+        $fogText = $neb['text'];
+        if (($kamera['sichtAnzahl'] ?? 0) > 1 && $kamera['sichtMin'] !== null
+            && abs((float) $kamera['sichtMin'] - (float) $kamera['sicht']) >= 10.0) {
+            $fogText .= sprintf(' | %d Kameras, mittlere Sicht %d %%, schlechteste %d %%',
+                (int) $kamera['sichtAnzahl'], (int) round((float) $kamera['sicht']),
+                (int) round((float) $kamera['sichtMin']));
+        }
+        $this->SetValue('FogText', $fogText);
         $this->SetValue('StormLevel', $gew['stufe']);
         $this->SetValue('StormDist', $gew['dist']);
         $this->SetValue('StormRate', $gew['rate']);
@@ -251,7 +399,9 @@ class WeatherStation extends IPSModule
         $this->SetValue('SunAzimuth', Meteo::sonnenazimut($lat, $lon));
         $this->SetValue('MoonIllum', round($mond['beleuchtet'] * 100, 1));
         $this->SetValue('IsNight', $nacht);
+        $this->sonnenschein($hoehe, $o->num('radiationWm2'));
         $this->SetValue('DataAge', $o->has('tempC') ? $o->age('tempC') : 0);
+        $this->vorhersage($lat, $lon);
         $this->SetValue('SourceMap', json_encode($herkunft, JSON_UNESCAPED_UNICODE));
         $this->SetValue('LastRun', time());
     }
@@ -320,7 +470,7 @@ class WeatherStation extends IPSModule
                 continue;
             }
             try {
-                $roh = @WXS_GetObservation($iid);
+                $roh = $this->istListener($iid) ? @WXT_GetObservation($iid) : @WXS_GetObservation($iid);
             } catch (\Throwable $e) {
                 continue;
             }
@@ -336,6 +486,13 @@ class WeatherStation extends IPSModule
             }
         }
         return [$o, $herkunft];
+    }
+
+    /** Ist die Instanz ein Empfaenger (liefert selbst eine Beobachtung) statt einer Quelle? */
+    private function istListener(int $iid): bool
+    {
+        return @IPS_InstanceExists($iid)
+            && IPS_GetInstance($iid)['ModuleInfo']['ModuleID'] === self::GUID_LISTENER;
     }
 
     /** @return array<int,array<string,mixed>> aktive Quellen in Rangfolge */
@@ -375,6 +532,16 @@ class WeatherStation extends IPSModule
     {
         if (!$this->ReadPropertyBoolean('UseCameras')) {
             return ['liste' => [], 'sicht' => null, 'schnee' => null];
+        }
+        // Bildauswertung ist der teuerste Teil des Laufs: Bild holen, entpacken, Kontrast je
+        // Ausschnitt rechnen. Seit die Station auf jede Quell-Aktualisierung reagiert, liefe das
+        // im Sekundentakt - fuer eine Groesse, die sich in Minuten aendert. Also eigener Takt,
+        // und dazwischen das letzte Ergebnis.
+        $takt = max(0, $this->ReadPropertyInteger('CameraSeconds'));
+        $c = json_decode($this->ReadAttributeString('CamCache'), true);
+        if ($takt > 0 && is_array($c) && isset($c['ts'], $c['res'])
+            && (time() - (int) $c['ts']) < $takt && is_array($c['res'])) {
+            return $c['res'];
         }
         $cams = json_decode($this->ReadPropertyString('Cameras'), true);
         if (!is_array($cams) || $cams === []) {
@@ -428,9 +595,28 @@ class WeatherStation extends IPSModule
         }
         $this->WriteAttributeString('CamBase', json_encode($base));
 
-        // Sicht = SCHLECHTESTE Kamera. Nebel liegt selten gleichmaessig; eine Kamera, die
-        // nichts mehr sieht, ist die wichtigere Meldung als der Durchschnitt.
-        return ['liste' => $liste, 'sicht' => $quoten === [] ? null : min($quoten), 'schnee' => $schnee];
+        // Sicht = MITTLERE Kamera (Median), nicht die schlechteste.
+        //
+        // Frueher entschied min(): eine einzige Kamera zog das Ergebnis nach unten. Am
+        // 19.08.2026 meldeten die vier Kameras 66, 82, 89 und 100 % - drei sahen klar, die
+        // Einfahrt nicht, und die Karte schrieb "diesig", waehrend draussen die Sonne schien.
+        // Eine verschmutzte Linse, Gegenlicht oder ein veralteter Klarwert reichen fuer so
+        // einen Ausreisser; echter Nebel dagegen liegt ueber ALLEN Blickrichtungen, dann
+        // faellt auch der Median. Die schlechteste Kamera geht nicht verloren - sie steht in
+        // der Tabelle und im Text.
+        $sicht = null;
+        if ($quoten !== []) {
+            sort($quoten);
+            $n = count($quoten);
+            $sicht = ($n % 2) ? $quoten[intdiv($n, 2)]
+                              : ($quoten[$n / 2 - 1] + $quoten[$n / 2]) / 2.0;
+        }
+        $res = ['liste' => $liste, 'sicht' => $sicht, 'schnee' => $schnee,
+                'sichtMin' => $quoten === [] ? null : min($quoten),
+                'sichtAnzahl' => count($quoten)];
+        $this->WriteAttributeString('CamCache', json_encode(['ts' => time(), 'res' => $res],
+                                                            JSON_UNESCAPED_UNICODE));
+        return $res;
     }
 
     /** @return array{x:float,y:float,w:float,h:float}|null Bildausschnitt in Anteilen */
@@ -447,6 +633,30 @@ class WeatherStation extends IPSModule
     // ==================================================================
     // Kleinkram
     // ==================================================================
+
+    /**
+     * Vorhersage holen und unveraendert ablegen.
+     *
+     * Selten genug: ein Vorhersagemodell rechnet stuendlich, oefter zu fragen bringt dieselbe
+     * Antwort. Faellt der Abruf aus, bleibt die letzte stehen — eine halbe Stunde alte
+     * Vorhersage ist brauchbar, eine geleerte Variable nicht.
+     */
+    private function vorhersage(float $lat, float $lon): void
+    {
+        if (!$this->ReadPropertyBoolean('UseForecast')) {
+            return;
+        }
+        $alter = time() - (int) $this->GetValue('ForecastAge');
+        if ($alter < max(5, $this->ReadPropertyInteger('ForecastMinutes')) * 60
+            && $this->GetValue('Forecast') !== '') {
+            return;
+        }
+        $j = Forecast::fetch($lat, $lon, $this->ReadPropertyInteger('ForecastDays'));
+        if ($j !== null) {
+            $this->SetValue('Forecast', $j);
+            $this->SetValue('ForecastAge', time());
+        }
+    }
 
     /** 850-hPa-Werte, hoechstens stuendlich neu geholt. */
     private function hoehenwerte(float $lat, float $lon): ?array
@@ -490,7 +700,8 @@ class WeatherStation extends IPSModule
                 continue;
             }
             try {
-                $l = json_decode((string) @WXS_GetStrikes($iid), true);
+                $l = json_decode((string) ($this->istListener($iid)
+                        ? @WXT_GetStrikes($iid) : @WXS_GetStrikes($iid)), true);
             } catch (\Throwable $e) {
                 continue;
             }
@@ -526,24 +737,123 @@ class WeatherStation extends IPSModule
      */
     private function regenGesamt(?float $tag): void
     {
+        $this->summe('RainTotal', 'RainDayLast', 'RainTotalStart', $tag);
+    }
+
+    /**
+     * Fortlaufender Gesamtzaehler aus einem TAGESWERT, der um Mitternacht auf null faellt.
+     *
+     * Gezaehlt wird die Zunahme, nicht der Stand: steigt der Tageswert, kommt die Differenz
+     * dazu; faellt er (Tageswechsel), zaehlt der neue Tageswert selbst als Zunahme. Damit
+     * entsteht eine Reihe, die nie faellt - genau das, was eine Zaehler-Aggregation braucht.
+     *
+     * Warum ueberhaupt: Tag, Monat und Jahr springen alle zurueck. Wer den Verbrauch ueber
+     * einen beliebigen Zeitraum wissen will (letzte 30 Tage, Vorjahresvergleich), braucht eine
+     * Reihe ohne Bruch. Regen und Verdunstung verhalten sich darin gleich.
+     */
+    private function summe(string $ident, string $attr, string $startProp, ?float $tag): void
+    {
         if ($tag === null) {
             return;
         }
-        $vorher = $this->ReadAttributeFloat('RainDayLast');
-        $this->WriteAttributeFloat('RainDayLast', $tag);
+        $vorher = $this->ReadAttributeFloat($attr);
+        $this->WriteAttributeFloat($attr, $tag);
 
-        $stand = (float) $this->GetValue('RainTotal');
+        $stand = (float) $this->GetValue($ident);
         if ($stand <= 0.0) {
-            $stand = (float) $this->ReadPropertyFloat('RainTotalStart');
+            $stand = (float) $this->ReadPropertyFloat($startProp);
         }
         if ($vorher < 0.0) {
-            $this->SetValue('RainTotal', round($stand, 2));   // erster Lauf: nur uebernehmen
+            $this->SetValue($ident, round($stand, 2));   // erster Lauf: nur uebernehmen
             return;
         }
         $zu = ($tag >= $vorher) ? ($tag - $vorher) : $tag;     // sonst Tageswechsel
         if ($zu > 0.0) {
-            $this->SetValue('RainTotal', round($stand + $zu, 2));
+            $this->SetValue($ident, round($stand + $zu, 2));
         }
+    }
+
+    /**
+     * Zustand eines einzelnen Regenmelders, oder null wenn er nichts Brauchbares sagt.
+     *
+     * NULL heisst "keine Aussage" und ist NICHT dasselbe wie false. Ein Melder, der seit
+     * Stunden schweigt, hat nicht "trocken" gemeldet - er hat gar nichts gemeldet, und ein
+     * eingefrorenes false wuerde den Regen eines lebenden Sensors ueberstimmen.
+     */
+    private function melder(int $id, int $maxAlter): ?bool
+    {
+        if ($id <= 0 || !@IPS_VariableExists($id)) {
+            return null;
+        }
+        if ($maxAlter > 0) {
+            $upd = (int) (@IPS_GetVariable($id)['VariableUpdated'] ?? 0);
+            if ($upd <= 0 || (time() - $upd) > $maxAlter) {
+                return null;   // stumm -> keine Stimme
+            }
+        }
+        $v = @GetValue($id);
+        if (is_bool($v))    { return $v; }
+        if (is_numeric($v)) { return ((float) $v) > 0.0; }
+        $t = strtolower(trim((string) $v));
+        return in_array($t, ['1', 'true', 'ja', 'nass', 'regen'], true);
+    }
+
+    /**
+     * Meldet einer der Regensensoren "nass"? RANGFOLGE, nicht Mehrheit.
+     *
+     * Der erste Sensor ist massgeblich, solange er antwortet. Erst wenn er schweigt, rueckt
+     * der zweite nach. Warum nicht ODER ueber beide: die Melder sind unterschiedlich schnell
+     * und unterschiedlich zuverlaessig. Der optische spricht in Sekunden an; ein beheizter
+     * Flaechensensor braucht laenger und war hier am 16.08. rund viereinhalb Minuten spaeter.
+     * Ein ODER wuerde beim ABTROCKNEN den langsameren entscheiden lassen - die Regenmeldung
+     * bliebe dann unnoetig lange stehen.
+     *
+     * Der zweite Melder ist damit Ersatz, nicht Ergaenzung: er traegt genau dann, wenn der
+     * erste ausfaellt, und stoert sonst nicht.
+     */
+    private function regenSensor(): ?bool
+    {
+        $maxAlter = max(0, $this->ReadPropertyInteger('RainSensorMaxAge'));
+        $erster = $this->melder($this->ReadPropertyInteger('RainSensorId'), $maxAlter);
+        if ($erster !== null) {
+            return $erster;
+        }
+        return $this->melder($this->ReadPropertyInteger('RainSensor2Id'), $maxAlter);
+    }
+
+    /**
+     * Sonnenschein: scheint sie gerade, und wie lange heute schon.
+     *
+     * Die Entscheidung lag frueher in einem Anzeigeskript, das die Schwelle in eine eigene
+     * Variable rechnete und sie dort mit der Strahlung verglich. Das gehoert hierher: die
+     * Sonnenhoehe rechnet dieses Modul ohnehin, die Strahlung misst es, und eine Kachel soll
+     * anzeigen und nicht entscheiden.
+     *
+     * Die Dauer wird aufsummiert statt aus dem Archiv gerechnet: sie soll auch dann stimmen,
+     * wenn jemand das Logging abschaltet. Gezaehlt wird die tatsaechlich verstrichene Zeit
+     * seit der letzten Auswertung, gedeckelt auf zehn Minuten - nach einem Neustart oder einer
+     * Pause darf keine Stunde Sonne entstehen, die niemand gesehen hat.
+     */
+    private function sonnenschein(float $hoehe, ?float $strahlung): void
+    {
+        $schwelle = Meteo::sonnenscheinSchwelle($hoehe);
+        $this->SetValue('SunThreshold', $schwelle);
+
+        // Ohne Strahlungsmesser gibt es keine Aussage - dann bleibt es aus, statt zu raten.
+        $scheint = ($strahlung !== null && $schwelle > 0.0 && $strahlung >= $schwelle);
+        $this->SetValue('Sunshine', $scheint);
+
+        $jetzt   = time();
+        $letzte  = $this->ReadAttributeInteger('SunshineLast');
+        $tagJetzt = (int) date('Ymd', $jetzt);
+        $tagAlt   = (int) date('Ymd', $letzte ?: $jetzt);
+        $summe   = ($letzte === 0 || $tagJetzt !== $tagAlt) ? 0.0 : (float) $this->GetValue('SunshineToday');
+
+        if ($scheint && $letzte > 0 && $tagJetzt === $tagAlt) {
+            $summe += min(600, max(0, $jetzt - $letzte)) / 3600.0;
+        }
+        $this->SetValue('SunshineToday', round($summe, 2));
+        $this->WriteAttributeInteger('SunshineLast', $jetzt);
     }
 
     /**
@@ -584,6 +894,13 @@ class WeatherStation extends IPSModule
      */
     private function tageswerte(): void
     {
+        // Tages-Min/Max kommen aus Archiv-Aggregaten - guenstiger als Punktabfragen, aber immer
+        // noch zwei Datenbankgriffe. Ein Tagesminimum aendert sich nicht in fuenf Sekunden.
+        $takt = max(0, $this->ReadPropertyInteger('DayValueSeconds'));
+        if ($takt > 0 && (time() - $this->ReadAttributeInteger('DayTs')) < $takt) {
+            return;
+        }
+        $this->WriteAttributeInteger('DayTs', time());
         $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
         if (!$aid) {
             return;
@@ -628,7 +945,7 @@ class WeatherStation extends IPSModule
      * ginge in der Aggregation verloren. Dasselbe gilt fuer Monat, Jahr und Verdunstung.
      * Die Regenrate ist ohnehin schon eine Rate.
      */
-    private const ZAEHLER = ['RainTotal'];
+    private const ZAEHLER = ['RainTotal', 'EtTotal'];
 
     private function applyLogging(): void
     {
@@ -751,11 +1068,14 @@ class WeatherStation extends IPSModule
                     . 'die einen frischen Wert hat; erst wenn sie ihn nicht liefert oder ihr Wert älter '
                     . 'ist als die Geltungsdauer, rückt die nächste nach. So liefert die genauere '
                     . 'Station Temperatur und Feuchte, während eine zweite die Blitze beisteuert.'],
+                ['type' => 'Label', 'caption' => 'Eintragen lässt sich eine WeatherSource — oder direkt ein '
+                    . 'Empfänger wie der TempestListener, der schon selbst eine vollständige Beobachtung '
+                    . 'liefert. Andere Instanzen werden übergangen.'],
                 ['type' => 'List', 'name' => 'Sources', 'caption' => 'Wetterquellen', 'rowCount' => 5,
                  'add' => true, 'delete' => true, 'sort' => ['column' => 'Priority', 'direction' => 'ascending'],
                  'columns' => [
                      ['caption' => 'Quelle', 'name' => 'InstanceID', 'width' => 'auto', 'add' => 0,
-                      'edit' => ['type' => 'SelectInstance', 'moduleID' => self::GUID_SOURCE]],
+                      'edit' => ['type' => 'SelectInstance']],
                      ['caption' => 'Rang', 'name' => 'Priority', 'width' => '70px', 'add' => 1,
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 1, 'maximum' => 99]],
                      ['caption' => 'gilt (s)', 'name' => 'MaxAge', 'width' => '90px', 'add' => 900,
@@ -825,8 +1145,37 @@ class WeatherStation extends IPSModule
                 ]],
             ]],
 
-            ['type' => 'NumberSpinner', 'name' => 'RainTotalStart',
-             'caption' => 'Startwert Regen kumuliert (mm)', 'digits' => 2],
+            ['type' => 'CheckBox', 'name' => 'UseForecast',
+             'caption' => 'Vorhersage von Open-Meteo holen (Stunden und Tage als JSON)'],
+            ['type' => 'Label', 'caption' => 'Eine Wetterstation misst, sie sagt nicht vorher — der '
+                . 'eingebaute Ausblick einer Davis ist eine Faustregel über den Luftdruckverlauf. '
+                . 'Die Vorhersage wird unverändert abgelegt, damit Anzeigen sie ohne Umweg lesen können.'],
+            ['type' => 'RowLayout', 'items' => [
+                ['type' => 'NumberSpinner', 'name' => 'ForecastMinutes', 'caption' => 'Abruf alle (Minuten)',
+                 'minimum' => 5, 'maximum' => 360],
+                ['type' => 'NumberSpinner', 'name' => 'ForecastDays', 'caption' => 'Tage', 'minimum' => 1, 'maximum' => 16],
+            ]],
+            ['type' => 'RowLayout', 'items' => [
+                ['type' => 'SelectVariable', 'name' => 'RainSensorId',
+                 'caption' => 'Regensensor (meldet nass)'],
+                ['type' => 'SelectVariable', 'name' => 'RainSensor2Id',
+                 'caption' => 'Ersatz-Regensensor'],
+                ['type' => 'NumberSpinner', 'name' => 'RainSensorMaxAge',
+                 'caption' => 'gilt als stumm nach (Sekunden)', 'minimum' => 0, 'maximum' => 86400],
+            ]],
+            ['type' => 'Label', 'caption' => 'Optional. Ein optischer Regensensor spricht sofort an, '
+                . 'die Messwippe der Station erst nach rund 0,2 mm — bei Nieselregen liegen Minuten '
+                . 'dazwischen, in denen die Wetterlage noch "bedeckt" sagt. Gebunden zählt der Sensor '
+                . 'als Nachweis, DASS es niederschlägt; die Menge kommt weiterhin nur aus der Station, '
+                . 'ob Regen oder Schnee entscheidet die Feuchtkugel. Der erste Sensor ist maßgeblich; '
+                . 'der Ersatz rückt nur nach, wenn der erste länger als die eingestellte Zeit schweigt — '
+                . 'ein ausgefallener Melder soll nicht "trocken" behaupten.'],
+            ['type' => 'RowLayout', 'items' => [
+                ['type' => 'NumberSpinner', 'name' => 'RainTotalStart',
+                 'caption' => 'Startwert Regen kumuliert (mm)', 'digits' => 2],
+                ['type' => 'NumberSpinner', 'name' => 'EtTotalStart',
+                 'caption' => 'Startwert Verdunstung kumuliert (mm)', 'digits' => 2],
+            ]],
             ['type' => 'Label', 'caption' => 'Der fortlaufende Gesamtregen zählt die Zunahme des '
                 . 'Tageswertes. Wer schon einen Zählerstand hat, trägt ihn hier ein, damit die Reihe '
                 . 'nicht bei null neu beginnt.'],
@@ -834,6 +1183,19 @@ class WeatherStation extends IPSModule
              'caption' => 'Fenster der gedämpften Temperatur (Minuten)', 'minimum' => 1, 'maximum' => 180],
             ['type' => 'Label', 'caption' => 'Die gedämpfte Außentemperatur glättet über dieses Fenster. '
                 . 'Beschattung und Heizung sollen nicht auf jede Wolke reagieren.'],
+            ['type' => 'CheckBox', 'name' => 'OnSourceUpdate',
+             'caption' => 'Bei jeder Aktualisierung einer Quelle neu rechnen'],
+            ['type' => 'Label', 'caption' => 'Sonst wird nur im Zeittakt oben gerechnet — die Werte '
+                . 'hinken dann bis zu einem Takt hinterher, obwohl die Station längst gemeldet hat. '
+                . 'Der Zeittakt bleibt als Sicherheitsnetz, falls eine Quelle verstummt.'],
+            ['type' => 'RowLayout', 'items' => [
+                ['type' => 'NumberSpinner', 'name' => 'MinGapSeconds',
+                 'caption' => 'Mindestabstand zweier Läufe (s)', 'minimum' => 1, 'maximum' => 600],
+                ['type' => 'NumberSpinner', 'name' => 'CameraSeconds',
+                 'caption' => 'Bildauswertung höchstens alle (s)', 'minimum' => 0, 'maximum' => 3600],
+                ['type' => 'NumberSpinner', 'name' => 'DayValueSeconds',
+                 'caption' => 'Tages-Min/Max höchstens alle (s)', 'minimum' => 0, 'maximum' => 3600],
+            ]],
             ['type' => 'CheckBox', 'name' => 'Logging', 'caption' => 'Messreihen archivieren (Temperatur, Feuchte, Wind, Nebel, Bewölkung …)'],
             ['type' => 'RowLayout', 'items' => [
                 ['type' => 'Button', 'caption' => 'Jetzt auswerten', 'onClick' => 'WX_Update($id);'],

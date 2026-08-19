@@ -15,6 +15,7 @@ foreach ([
     'IStrikeSource.php',
     'Engines/Meteo.php',
     'Engines/UpperAir.php',
+    'Engines/Forecast.php',
     'Engines/StationCodes.php',
     'Engines/WeatherEngine.php',
     'Engines/CameraVision.php',

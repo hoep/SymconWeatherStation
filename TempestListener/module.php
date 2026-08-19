@@ -45,6 +45,11 @@ class TempestListener extends IPSModule
         $this->RegisterPropertyString('Serial', '');       // leer = jede Station annehmen
         $this->RegisterPropertyBoolean('RapidWind', true); // Boeenwerte im 3-Sekunden-Takt
         $this->RegisterPropertyBoolean('Mirror', true);    // empfangene Werte als Variablen zeigen
+        $this->RegisterPropertyBoolean('Logging', true);   // Messreihen archivieren
+        // Die Tempest meldet den Druck AM AUFSTELLORT. Ohne Umrechnung passt er zu keiner
+        // anderen Quelle - hier gemessen 962 gegen 1013 hPa.
+        $this->RegisterPropertyBoolean('PressureAbsolute', true);
+        $this->RegisterPropertyFloat('Altitude', 0.0);
 
         $this->RegisterVariableString('Data', 'Beobachtung (JSON)', '', 10);
         $this->RegisterVariableInteger('LastObs', 'Letzter Messsatz', '~UnixTimestamp', 20);
@@ -214,6 +219,20 @@ class TempestListener extends IPSModule
             $o->set('windKmh', (float) $rw['kmh'], (int) $rw['zeit']);
             $o->set('windDirDeg', (float) $rw['dir'], (int) $rw['zeit']);
         }
+        // Stationsdruck auf Meeresniveau bringen. Ohne Hoehe lieber gar keinen Wert als einen,
+        // der zu jeder anderen Quelle um Dutzende Hektopascal danebenliegt.
+        if ($o->has('pressureHpa') && $this->ReadPropertyBoolean('PressureAbsolute')) {
+            $h = (float) $this->ReadPropertyFloat('Altitude');
+            if ($h > 0.0) {
+                $t0 = ($o->num('tempC') ?? 15.0) + 273.15;
+                $o->set('pressureHpa',
+                        round($o->num('pressureHpa') * pow(1 - (0.0065 * $h) / ($t0 + 0.0065 * $h), -5.257), 1),
+                        $o->ts('pressureHpa'));
+            } else {
+                $o->remove('pressureHpa');
+            }
+        }
+
         // Blitze: der JUENGSTE Schlag mit seiner EIGENEN Entfernung und Zeit.
         $ring = json_decode($this->ReadAttributeString('Strikes'), true);
         if (is_array($ring) && $ring !== []) {
@@ -255,6 +274,31 @@ class TempestListener extends IPSModule
             }
             $this->RegisterVariableFloat($var, $name, Profiles::forQuantity($ident), $pos);
             $this->SetValue($var, (float) $a[$ident]['wert']);
+        }
+        if ($this->ReadPropertyBoolean('Logging')) {
+            $this->applyLogging(array_keys($a));
+        }
+    }
+
+    /**
+     * Archiviert die Messreihen. Zaehler und Kennungen bleiben aussen vor — sie sind Zustand,
+     * keine Messreihe, und ein Blitzzeitpunkt als Mittelwert je Stunde ergibt nichts.
+     */
+    private function applyLogging(array $idents): void
+    {
+        static $nicht = ['strikeTime', 'precipType'];
+        $aid = @IPS_GetInstanceListByModuleID('{43192F0B-135B-4CE7-A0A7-1475603F3060}')[0] ?? 0;
+        if (!$aid) {
+            return;
+        }
+        foreach ($idents as $ident) {
+            if ($ident === '' || $ident[0] === '_' || in_array($ident, $nicht, true)) {
+                continue;
+            }
+            $vid = @$this->GetIDForIdent('q_' . $ident);
+            if ($vid && !AC_GetLoggingStatus($aid, $vid)) {
+                AC_SetLoggingStatus($aid, $vid, true);
+            }
         }
     }
 
@@ -302,6 +346,14 @@ class TempestListener extends IPSModule
             ['type' => 'ValidationTextBox', 'name' => 'Serial', 'caption' => 'Seriennummer (leer = jede Station)'],
             ['type' => 'CheckBox', 'name' => 'RapidWind', 'caption' => 'Windwerte im Drei-Sekunden-Takt übernehmen'],
             ['type' => 'CheckBox', 'name' => 'Mirror', 'caption' => 'Empfangene Werte als eigene Variablen zeigen'],
+            ['type' => 'CheckBox', 'name' => 'Logging', 'caption' => 'Messreihen archivieren'],
+            ['type' => 'RowLayout', 'items' => [
+                ['type' => 'CheckBox', 'name' => 'PressureAbsolute', 'caption' => 'Luftdruck ist Stationsdruck'],
+                ['type' => 'NumberSpinner', 'name' => 'Altitude', 'caption' => 'Höhe des Aufstellorts (m über NN)', 'digits' => 0],
+            ]],
+            ['type' => 'Label', 'caption' => 'Die Tempest meldet den Druck am Aufstellort. Ohne Höhenangabe '
+                . 'wird er gar nicht geliefert — ein um Dutzende Hektopascal abweichender Wert wäre '
+                . 'schlimmer als keiner.'],
             ['type' => 'Label', 'caption' =>
                 'Der Beobachtungssatz kommt nur einmal pro Minute. Der Drei-Sekunden-Wind ist deshalb '
                 . 'der einzige Weg zu einem wirklich aktuellen Windwert — für Beschattung und '

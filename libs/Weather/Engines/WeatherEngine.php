@@ -91,9 +91,29 @@ final class WeatherEngine
             } elseif ($sicht <= $c['sightWarn']) {
                 $stufe = max($stufe, self::NEBEL_NEBEL);
                 $text .= sprintf(' | Kamera: Sicht %d %% — eingeschränkt', (int) $sicht);
-            } elseif ($stufe >= self::NEBEL_NEBEL && $sicht > 85) {
-                $stufe = self::NEBEL_DIESIG;
-                $text .= sprintf(' | Kamera: Sicht %d %% — gerechnete Stufe zurückgenommen', (int) $sicht);
+            } elseif ($stufe >= self::NEBEL_DIESIG) {
+                // DIE KAMERA SIEHT NACH, DER REGELSATZ RECHNET NUR.
+                //
+                // Feuchte und Taupunktdifferenz sagen, ob Nebel entstehen KANN - ob er da ist,
+                // sieht man. Steht die gemessene Sicht deutlich ueber der Warnschwelle, wird die
+                // gerechnete Stufe zurueckgenommen; frueher geschah das erst ab fest verdrahteten
+                // 85 %% und nur bis "diesig". Bei 96 %% Luftfeuchte, 0,6 K Spread und drei Kameras
+                // mit 83-92 %% Sicht stand deshalb "Nebel" auf der Karte, waehrend man bis zum
+                // Zaun sah.
+                //
+                // Die Grenze fuer "deutlich klar" leitet sich aus der eingestellten Warnschwelle
+                // ab statt aus einer zweiten festen Zahl: die Mitte zwischen ihr und 100 %.
+                // Bei sightWarn 55 sind das 77,5 %% - darueber ist kein Nebel, darunter bleibt
+                // Dunst als Zwischenstufe stehen.
+                //
+                // Die Bedingung lautet bewusst ">= DIESIG" und nicht ">= NEBEL": sonst wird die
+                // Kamera bei gerechnetem Dunst gar nicht erst gefragt, und "diesig" bleibt
+                // stehen, obwohl sie freie Sicht meldet.
+                $klar = ($c['sightWarn'] + 100.0) / 2.0;
+                $stufe = ($sicht > $klar) ? self::NEBEL_KEIN : self::NEBEL_DIESIG;
+                $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — %s', (int) $sicht, $klar,
+                                 $stufe === self::NEBEL_KEIN ? 'gemessen klar, gerechnete Stufe verworfen'
+                                                             : 'gerechnete Stufe auf Dunst zurückgenommen');
             }
         }
         return ['stufe' => $stufe, 'fsi' => $fsi, 'text' => $text];
@@ -310,18 +330,30 @@ final class WeatherEngine
      *
      * @return array{art:int,twet:float|null,text:string}
      */
-    public static function niederschlag(Observation $o): array
+    public static function niederschlag(Observation $o, ?bool $sensorNass = null): array
     {
         $mm = $o->num('rainRateMmH') ?? 0.0;
         $t  = $o->num('tempC');
         $rh = $o->num('humPct');
+        // Ein optischer Regensensor meldet SOFORT, eine Wippe erst nach rund 0,2 mm. Bei
+        // Nieselregen liegen dazwischen Minuten, in denen die Station "kein Niederschlag"
+        // sagt, waehrend es draussen nass wird. Der Sensor zaehlt deshalb als Nachweis, DASS
+        // es niederschlaegt - eine Menge liefert er nicht und es wird auch keine erfunden.
+        $nass = ($sensorNass === true) || ($mm > 0.01);
         if ($t === null || $rh === null) {
-            return ['art' => $mm > 0.01 ? self::NS_REGEN : self::NS_KEIN, 'twet' => null,
+            return ['art' => $nass ? self::NS_REGEN : self::NS_KEIN, 'twet' => null,
                     'text' => 'ohne Temperatur und Feuchte nicht unterscheidbar'];
         }
         $tw = Meteo::feuchtkugel($t, $rh);
-        if ($mm <= 0.01) {
+        if (!$nass) {
             return ['art' => self::NS_KEIN, 'twet' => $tw, 'text' => 'kein Niederschlag'];
+        }
+        if ($mm <= 0.01) {
+            // Nur der Sensor spricht an: die Art bestimmt weiterhin die Feuchtkugel, aber der
+            // Text sagt offen, woher die Aussage kommt und dass keine Menge dahintersteht.
+            $art = $tw < 0.5 ? self::NS_SCHNEE : ($tw <= 1.5 ? self::NS_SCHNEEREGEN : self::NS_REGEN);
+            return ['art' => $art, 'twet' => $tw,
+                    'text' => sprintf('Regensensor meldet nass, Messwippe noch ohne Ausschlag (Feuchtkugel %.1f °C)', $tw)];
         }
         if ($tw < 0.5) {
             return ['art' => self::NS_SCHNEE, 'twet' => $tw, 'text' => sprintf('Schnee (Feuchtkugel %.1f °C)', $tw)];

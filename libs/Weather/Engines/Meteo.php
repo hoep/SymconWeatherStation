@@ -106,6 +106,31 @@ final class Meteo
     }
 
     /**
+     * Schwelle der Globalstrahlung, ab der SONNENSCHEIN gezaehlt wird (W/m2).
+     *
+     * Nicht dasselbe wie "es ist hell": die Weltorganisation fuer Meteorologie definiert
+     * Sonnenscheindauer ueber die DIREKTE Strahlung (ab 120 W/m2). Ein Globalstrahlungs-
+     * messer sieht Direkt- und Streulicht zusammen und misst an einem trueben Sommertag
+     * mehr als an einem klaren Wintermorgen - eine feste Zahl taugt deshalb nicht.
+     *
+     * Gebraeuchlich ist stattdessen die Naeherung von Carpentier: rund drei Viertel des
+     * Klarhimmelwerts, jahreszeitlich korrigiert. Wird sie ueberschritten, kommt genug
+     * direkte Strahlung an, dass ein Schatten fiele.
+     *
+     * Unter 3 Grad Sonnenhoehe gibt es keine Schwelle (0): so flach faellt kein Licht mehr
+     * ein, das man Sonnenschein nennen wuerde, und die Formel wuerde beliebig klein.
+     */
+    public static function sonnenscheinSchwelle(float $sonnenhoehe, ?int $zeit = null): float
+    {
+        if ($sonnenhoehe <= 3.0) {
+            return 0.0;
+        }
+        $tag = (int) date('z', $zeit ?? time()) + 1;
+        $jahreszeit = 0.73 + 0.06 * cos(deg2rad(360.0 * $tag / 365.0));
+        return round($jahreszeit * 1080.0 * pow(sin(deg2rad($sonnenhoehe)), 1.25), 0);
+    }
+
+    /**
      * Bewoelkungsgrad 0..1 aus gemessener und theoretischer Strahlung (Kasten & Czeplak 1980,
      * nach Bedeckungsgrad aufgeloest).
      *
