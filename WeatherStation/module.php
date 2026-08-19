@@ -27,6 +27,21 @@ use Hoep\Weather\Observation;
  */
 class WeatherStation extends IPSModule
 {
+    /**
+     * Ab dieser Sonnenhoehe (Grad) ist die Kamerasicht als Nebel-Beleg zugelassen.
+     * Darunter faellt der Bildkontrast wegen des Lichts, nicht wegen Nebels - gemessen am
+     * 19.08.2026 bei klarem Himmel: 44-56 % Sicht und Dunkelkanal 60-73 statt nahe null.
+     * Der Regelsatz (Feuchte, Taupunktdifferenz, Wind) arbeitet rund um die Uhr weiter.
+     */
+    private const CAM_SUN_MIN = 5.0;
+
+    /**
+     * Mindestdauer (Sekunden), die eine geaenderte Nebelstufe anhalten muss, bevor sie
+     * veroeffentlicht wird. Ohne diese Sperre wechselte der Zustand am 19.08.2026
+     * 153-mal an einem Tag, teils im Zehn-Sekunden-Takt.
+     */
+    private const FOG_DWELL = 300;
+
     private const GUID_SOURCE   = '{B24C7F1E-9A05-4E63-8D17-3F92C6B0A5D8}';
     /**
      * Ein Empfaenger, der schon selbst eine vollstaendige Beobachtung liefert, darf DIREKT als
@@ -40,7 +55,7 @@ class WeatherStation extends IPSModule
     private const GUID_LISTENER = '{5F8C21D4-6A7B-4E90-B3C2-8D14E7F6A2B9}';
 
     /** Variablen, die als Messreihe etwas taugen — nur die werden archiviert. */
-    private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'Wind', 'WindAvg', 'Gust', 'WindDir',
+    private const LOGGEN = ['Temp', 'Hum', 'Dew', 'WetBulb', 'WBGT', 'CoolRes', 'VPD', 'ET0', 'ET0Day', 'Wind', 'WindAvg', 'Gust', 'WindDir',
                             'Pressure', 'RainRate', 'RainDay', 'RainMonth', 'RainYear', 'RainLast',
                             'EtDay', 'EtMonth', 'EtYear', 'EtTotal', 'TempIn', 'HumIn', 'Battery',
                             'Radiation', 'Illuminance', 'UV', 'CloudPct',
@@ -66,6 +81,12 @@ class WeatherStation extends IPSModule
         $this->RegisterPropertyFloat('Lon', 0.0);
         $this->RegisterPropertyString('Sources', '[]');   // [{InstanceID,Priority,MaxAge,Enabled}]
         $this->RegisterPropertyString('Cameras', '[]');   // [{MediaID,Name,X,Y,W,H,Enabled}]
+        // Bodenfeuchte: beliebig viele Fuehler, je Zeile mit EIGENER Skala.
+        // Typ 0 = Prozent (hoch = feucht, z. B. Gardena), Typ 1 = Zentibar Saugspannung
+        // (hoch = TROCKEN, z. B. Davis/Watermark). Die beiden laufen gegenlaeufig - genau
+        // deshalb steht der Typ je Fuehler und wird nicht geraten.
+        $this->RegisterPropertyString('SoilSensors', '[]'); // [{VarID,Name,Typ,Enabled}]
+        $this->RegisterPropertyFloat('WindHeight', 10.0); // Messhoehe des Windgebers in m (fuer ET0)
         $this->RegisterPropertyBoolean('UseCameras', true);
         $this->RegisterPropertyBoolean('Logging', true);
         $this->RegisterPropertyInteger('DampMinutes', 15);   // Fenster der gedaempften Temperatur
@@ -147,6 +168,20 @@ class WeatherStation extends IPSModule
 
         // --- Abgeleitet ---
         $this->RegisterVariableFloat('WetBulb', 'Feuchtkugel', '~Temperature', 30);
+        // HITZEBELASTUNG (WBGT, ISO 7243 / DGUV). Ergaenzt die Feuchtkugel: die sagt, ob
+        // Schwitzen ueberhaupt noch kuehlen kann, der WBGT ab wann Arbeit gefaehrlich wird.
+        $this->RegisterVariableFloat('CoolRes', 'Kühlreserve (Verdunstungskälte)', 'WX.Kelvin', 30);
+        $this->RegisterVariableFloat('VPD', 'Dampfdruckdefizit (VPD)', 'WX.Druck', 35);
+        $this->RegisterVariableFloat('ET0', 'Verdunstung ET0 (Rate)', 'WX.Regenrate', 37);
+        $this->RegisterVariableFloat('ET0Day', 'Verdunstung ET0 heute', '~Rainfall', 37);
+        $this->RegisterVariableInteger('SoilLevel', 'Bodenfeuchte', 'WX.Boden', 36);
+        $this->RegisterVariableString('SoilText', 'Bodenfeuchte · Fühler', '', 36);
+        $this->RegisterVariableString('SoilJson', 'Bodenfeuchte (JSON)', '', 36);
+        $this->RegisterVariableString('SoilTable', 'Bodenfeuchte · Tabelle', '', 36);
+        $this->RegisterVariableInteger('CoolLevel', 'Kühlreserve · Stufe', 'WX.Kuehlreserve', 30);
+        $this->RegisterVariableFloat('WBGT', 'Hitzebelastung · WBGT', '~Temperature', 31);
+        $this->RegisterVariableInteger('HeatLevel', 'Hitzebelastung', 'WX.Hitze', 31);
+        $this->RegisterVariableString('HeatText', 'Hitzebelastung · Hinweis', '', 31);
         $this->RegisterVariableInteger('PrecipType', 'Niederschlagsart', 'WX.Niederschlag', 31);
         $this->RegisterVariableInteger('FogLevel', 'Nebel', 'WX.Nebel', 32);
         $this->RegisterVariableFloat('FogFSI', 'Nebel · FSI', 'WX.FSI', 33);
@@ -295,6 +330,10 @@ class WeatherStation extends IPSModule
                 'fogSpread' => $this->ReadPropertyFloat('FogSpread'),
                 'sightWarn' => $this->ReadPropertyInteger('SightWarn'),
                 'sightFog' => $this->ReadPropertyInteger('SightFog'),
+                // Die Kamera zaehlt nur, solange die Sonne hoch genug steht. Der Klarwert, gegen
+                // den ihre Sicht gerechnet wird, ist bei Tageslicht gelernt; in der Daemmerung
+                // faellt der Kontrast wegen des Lichts, nicht wegen Nebels.
+                'camUsable' => $hoehe >= self::CAM_SUN_MIN,
                 'stormNearKm' => $this->ReadPropertyInteger('StormNearKm'),
                 'stormNearMin' => $this->ReadPropertyInteger('StormNearMin'),
                 'stormFarKm' => $this->ReadPropertyInteger('StormFarKm'),
@@ -353,9 +392,90 @@ class WeatherStation extends IPSModule
         $this->tageswerte();
 
         $this->put('WetBulb', $ns['twet']);
+        // WBGT braucht nur Temperatur und Feuchte - beides Pflichtwerte der Station.
+        $tW = $o->num('tempC'); $rhW = $o->num('humPct');
+        if ($tW !== null && $rhW !== null) {
+            $kr = Meteo::kuehlreserve($tW, $rhW);
+            $this->put('CoolRes', $kr);
+            $this->put('VPD', Meteo::vpd($tW, $rhW));
+            // ET0 braucht zusaetzlich Wind, Strahlung und Luftdruck. Fehlt eines davon,
+            // wird NICHT gerechnet - eine Verdunstung ohne Strahlungsterm waere Unsinn.
+            $wKmh = $o->num('windKmh') ?? $o->num('windAvgKmh');
+            $rsW  = $o->num('radiationWm2');
+            $pH   = $o->num('pressureHpa');
+            if ($wKmh !== null && $rsW !== null && $pH !== null) {
+                $u2  = Meteo::windAuf2m($wKmh, $this->ReadPropertyFloat('WindHeight'));
+                $rso = Meteo::klarhimmel($hoehe);
+                $vor = json_decode((string) $this->GetBuffer('ET0State'), true);
+                $alt = is_array($vor) ? $vor : [];
+                $r   = Meteo::et0($tW, $rhW, $u2, $rsW, $pH, $rso,
+                                  isset($alt['ratio']) ? (float) $alt['ratio'] : null);
+                $this->put('ET0', round(max(0.0, $r['et0']), 3));
+                // Tagessumme aus der verstrichenen Zeit seit dem letzten Lauf. Negative
+                // Stundenwerte (klare Nacht, Taubildung) werden auf 0 begrenzt: sie sind
+                // physikalisch Kondensation, keine negative Bewaesserung.
+                $nun = time();
+                $letzt = (int) ($alt['ts'] ?? 0);
+                $tagS  = (string) ($alt['tag'] ?? '');
+                $heute = date('Y-m-d');
+                $summe = ($tagS === $heute) ? (float) ($alt['sum'] ?? 0.0) : 0.0;
+                if ($letzt > 0 && $tagS === $heute) {
+                    $dt = min(3600, max(0, $nun - $letzt)) / 3600.0;
+                    $summe += max(0.0, $r['et0']) * $dt;
+                }
+                $this->put('ET0Day', round($summe, 2));
+                $this->SetBuffer('ET0State', json_encode([
+                    'ts' => $nun, 'tag' => $heute, 'sum' => $summe,
+                    'ratio' => $r['ratio'] ?? ($alt['ratio'] ?? null)]));
+            }
+        }
+        $bf = $this->bodenfeuchte();
+        $this->SetValue('SoilLevel', $bf['stufe']);
+        $this->SetValue('SoilText', $bf['text']);
+        $this->SetValue('SoilJson', json_encode($bf['liste'], JSON_UNESCAPED_UNICODE));
+        // Dieselben Daten nochmal als 2D-Feld fuer das Tabellen-Widget (Zeile 0 = Kopf).
+        $namen = ['nass', 'feucht', 'mäßig', 'trocken', 'sehr trocken', 'staubtrocken'];
+        $tab = [['Fühler', 'Messwert', 'Zustand']];
+        foreach ($bf['liste'] as $l) {
+            if (isset($l['fehler'])) { $tab[] = [$l['name'], '—', $l['fehler']]; continue; }
+            $z = $namen[$l['stufe']] ?? '?';
+            if (!empty($l['veraltet'])) {
+                $z .= ' (veraltet, ' . max(1, (int) round($l['alterS'] / 86400)) . ' d)';
+            }
+            $tab[] = [$l['name'], $l['text'], $z];
+        }
+        $this->SetValue('SoilTable', json_encode($tab, JSON_UNESCAPED_UNICODE));
+        if ($tW !== null && $rhW !== null) {
+            $this->SetValue('CoolLevel', Meteo::kuehlstufe($kr)['stufe']);
+            $wb = Meteo::wbgt($tW, $rhW);
+            $hs = Meteo::hitzestufe($wb);
+            $this->put('WBGT', $wb);
+            $this->SetValue('HeatLevel', $hs['stufe']);
+            $this->SetValue('HeatText', sprintf('%s (WBGT %.1f °C, ohne Strahlungslast) — %s',
+                $hs['name'], $wb, $hs['hinweis']));
+        }
         $this->SetValue('PrecipType', $ns['art']);
         $this->SetValue('RainDetected', $nass === true);
-        $this->SetValue('FogLevel', $neb['stufe']);
+        // ENTPRELLEN: eine neue Stufe wird erst veroeffentlicht, wenn sie FOG_DWELL Sekunden
+        // anhaelt. Nebel bildet sich und loest sich in Minuten, nicht in Sekunden - eine
+        // Anzeige, die im Zehn-Sekunden-Takt springt, ist keine Aussage, sondern Rauschen.
+        // Auf dem Weg NACH OBEN wie nach unten gleich, damit keine Richtung bevorzugt wird.
+        $roh = (int) $neb['stufe'];
+        $ent = json_decode((string) $this->GetBuffer('FogDebounce'), true);
+        $jetzt = time();
+        $stand = is_array($ent) ? (int) ($ent['stufe'] ?? $roh) : $roh;
+        $kand  = is_array($ent) ? (int) ($ent['kand'] ?? $roh) : $roh;
+        $seit  = is_array($ent) ? (int) ($ent['seit'] ?? $jetzt) : $jetzt;
+        if ($roh !== $kand) { $kand = $roh; $seit = $jetzt; }
+        if ($roh !== $stand && ($jetzt - $seit) >= self::FOG_DWELL) { $stand = $roh; }
+        $this->SetBuffer('FogDebounce',
+            json_encode(['stufe' => $stand, 'kand' => $kand, 'seit' => $seit]));
+        if ($stand !== $roh) {
+            $neb['text'] .= sprintf(' | gemessen "%s", noch nicht bestätigt (%d s von %d)',
+                ['kein Nebel', 'diesig', 'Nebel', 'dichter Nebel'][$roh] ?? $roh,
+                $jetzt - $seit, self::FOG_DWELL);
+        }
+        $this->SetValue('FogLevel', $stand);
         $this->SetValue('FogFSI', (float) ($neb['fsi'] ?? 0.0));
         // Nebel als DICHTE in Prozent — dafuer, dass Anzeigen eine stetige Groesse brauchen.
         // Liegt eine Kameramessung vor, ist sie massgeblich (Dichte = fehlende Sicht); sonst
@@ -528,6 +648,87 @@ class WeatherStation extends IPSModule
     // ==================================================================
 
     /** @return array{liste:array,sicht:float|null,schnee:bool|null} */
+    /**
+     * Bodenfeuchte aus den gebundenen Fuehlern.
+     *
+     * Es wird NICHT auf eine gemeinsame Prozentzahl umgerechnet. Eine Saugspannung in
+     * Zentibar und ein kapazitiver Prozentwert messen verschiedene Dinge; eine Umrechnung
+     * waere eine erfundene Zahl. Stattdessen bekommt jeder Fuehler die Stufe nach SEINER
+     * Skala, und die Zone gibt die TROCKENSTE davon wieder - fuer die Bewaesserung zaehlt der
+     * durstigste Bereich, nicht der Mittelwert.
+     *
+     * Veraltete Werte werden ausdruecklich als solche gemeldet statt stillschweigend
+     * mitgerechnet: im Bestand lagen Fuehler, deren letzter Wert Monate alt war.
+     *
+     * @return array{stufe:int,text:string,liste:array}
+     */
+    private function bodenfeuchte(): array
+    {
+        $cfg = json_decode($this->ReadPropertyString('SoilSensors'), true);
+        if (!is_array($cfg) || $cfg === []) {
+            return ['stufe' => 6, 'text' => 'kein Fühler gebunden', 'liste' => []];
+        }
+        $liste = []; $max = -1; $alt = [];
+        foreach ($cfg as $c) {
+            if (!is_array($c) || (isset($c['Enabled']) && !$c['Enabled'])) { continue; }
+            $vid = (int) ($c['VarID'] ?? 0);
+            $name = (string) ($c['Name'] ?? ('#' . $vid));
+            if ($vid <= 0 || !@IPS_VariableExists($vid)) {
+                $liste[] = ['name' => $name, 'fehler' => 'Variable gibt es nicht'];
+                continue;
+            }
+            $wert = @GetValue($vid);
+            if (!is_numeric($wert)) {
+                $liste[] = ['name' => $name, 'fehler' => 'kein Zahlenwert'];
+                continue;
+            }
+            $wert = (float) $wert;
+            $typ  = (int) ($c['Typ'] ?? 0);
+            $alterS = time() - (int) IPS_GetVariable($vid)['VariableUpdated'];
+            if ($typ === 1) {
+                // Zentibar: 0-10 gesaettigt, bis 30 feucht, bis 60 maessig, bis 100 trocken,
+                // darueber sehr trocken (uebliche Bewaesserungsschwellen fuer Watermark-Fuehler).
+                // Zentibar (Saugspannung), Staffel fuer Watermark-Fuehler:
+                // <10 gesaettigt, <30 feucht, <60 maessig, <100 trocken, <150 sehr trocken,
+                // darueber staubtrocken (Pflanzen im Dauerstress).
+                $st = ($wert < 10) ? 0 : (($wert < 30) ? 1 : (($wert < 60) ? 2
+                    : (($wert < 100) ? 3 : (($wert < 150) ? 4 : 5))));
+                $txt = sprintf('%.0f cb', $wert);
+            } else {
+                // Prozent kapazitiv: hoch = feucht.
+                // Prozent (kapazitiv): hoch = feucht, gespiegelte Staffel zur Saugspannung.
+                $st = ($wert >= 85) ? 0 : (($wert >= 65) ? 1 : (($wert >= 45) ? 2
+                    : (($wert >= 30) ? 3 : (($wert >= 15) ? 4 : 5))));
+                $txt = sprintf('%.0f %%', $wert);
+            }
+            $veraltet = $alterS > 86400;
+            // pct und farbe sind reine ANZEIGEwerte fuer die Balkendarstellung: der Balken
+            // braucht eine gemeinsame 0..100-Achse, obwohl die Fuehler verschiedene Skalen
+            // messen. Die ZAHL daneben bleibt immer der echte Messwert in seiner Einheit -
+            // der Balken vergleicht, die Zahl misst.
+            $pct = ($typ === 1)
+                ? max(0.0, min(100.0, 100.0 * (1.0 - min(200.0, max(0.0, $wert)) / 200.0)))
+                : max(0.0, min(100.0, $wert));
+            $farben = ['info', 'u-stufe1', 'u-stufe2', 'u-stufe3', 'u-stufe4', 'u-stufe5'];
+            $liste[] = ['name' => $name, 'wert' => $wert, 'typ' => $typ, 'stufe' => $st,
+                        'text' => $txt, 'alterS' => $alterS, 'veraltet' => $veraltet,
+                        'pct' => round($pct, 1), 'farbe' => $farben[$st] ?? 'muted'];
+            if ($veraltet) { $alt[] = $name; continue; }      // veraltete Fuehler nicht werten
+            if ($st > $max) { $max = $st; }
+        }
+        if ($max < 0) {
+            return ['stufe' => 6, 'liste' => $liste,
+                    'text' => $alt === [] ? 'kein brauchbarer Fühler'
+                                          : 'alle Fühler veraltet: ' . implode(', ', $alt)];
+        }
+        $teile = [];
+        foreach ($liste as $l) {
+            if (isset($l['fehler'])) { $teile[] = $l['name'] . ': ' . $l['fehler']; continue; }
+            $teile[] = $l['name'] . ' ' . $l['text'] . ($l['veraltet'] ? ' (veraltet!)' : '');
+        }
+        return ['stufe' => $max, 'liste' => $liste, 'text' => implode(' | ', $teile)];
+    }
+
     private function kameras(bool $nacht): array
     {
         if (!$this->ReadPropertyBoolean('UseCameras')) {
@@ -995,6 +1196,8 @@ class WeatherStation extends IPSModule
             'WX.Grad'      => ['°', 0, 0.0, 360.0],
             'WX.FSI'       => ['', 0, 0.0, 200.0],
             'WX.AbsFeuchte'=> [' g/m³', 2, 0.0, 60.0],
+            'WX.Kelvin'    => [' K', 1, 0.0, 40.0],   // Kuehlreserve = Temperaturdifferenz
+            'WX.Druck'     => [' hPa', 1, 0.0, 60.0],  // Dampfdruckdefizit
         ];
         foreach ($u as $name => [$suffix, $dig, $min, $max]) {
             if (IPS_VariableProfileExists($name)) {
@@ -1018,6 +1221,17 @@ class WeatherStation extends IPSModule
             'WX.Niederschlag' => [[0, 'kein Niederschlag', 0x63757b], [1, 'Regen', 0x5ab6ff],
                                   [2, 'Schneeregen', 0x9db8e6], [3, 'Schnee', 0xe7eef0]],
             'WX.Zug' => [[-1, 'zieht auf', 0xf2685a], [0, 'steht', 0x63757b], [1, 'zieht ab', 0x39d08a]],
+            // Farben wie die Gefahrenstufen-Palette der Visualisierung (u-stufe1..5).
+            'WX.Boden' => [[0, 'nass', 0x5ab6ff], [1, 'feucht', 0x00cdab],
+                           [2, 'mäßig', 0xeab308], [3, 'trocken', 0xf97316],
+                           [4, 'sehr trocken', 0xef4444], [5, 'staubtrocken', 0x991b1b],
+                           [6, 'kein Fühler', 0x63757b]],
+            'WX.Kuehlreserve' => [[0, 'reichlich', 0x00cdab], [1, 'gut', 0xeab308],
+                                  [2, 'knapp', 0xf97316], [3, 'kaum', 0xef4444],
+                                  [4, 'keine', 0x991b1b]],
+            'WX.Hitze' => [[0, 'unbedenklich', 0x00cdab], [1, 'erhöht', 0xeab308],
+                           [2, 'hoch', 0xf97316], [3, 'sehr hoch', 0xef4444],
+                           [4, 'extrem', 0x991b1b]],
         ];
         foreach ($p as $name => $werte) {
             if (IPS_VariableProfileExists($name)) {
@@ -1111,6 +1325,25 @@ class WeatherStation extends IPSModule
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 5, 'maximum' => 100]],
                      ['caption' => 'Höhe %', 'name' => 'H', 'width' => '80px', 'add' => 100,
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 5, 'maximum' => 100]],
+                     ['caption' => 'aktiv', 'name' => 'Enabled', 'width' => '70px', 'add' => true,
+                      'edit' => ['type' => 'CheckBox']],
+                 ]],
+                ['type' => 'Label', 'caption' =>
+                    'Bodenfeuchte: Fühler frei binden. Die Skalen laufen GEGENLÄUFIG — Prozent heißt '
+                    . 'hoch = feucht (kapazitiv, z. B. Gardena), Zentibar heißt hoch = TROCKEN '
+                    . '(Saugspannung, z. B. Davis/Watermark). Deshalb steht der Typ je Zeile. '
+                    . 'Gewertet wird der TROCKENSTE Fühler, nicht der Mittelwert; Werte älter als '
+                    . 'einen Tag gelten als veraltet und zählen nicht mit.'],
+                ['type' => 'List', 'name' => 'SoilSensors', 'caption' => 'Bodenfeuchte-Fühler', 'rowCount' => 6,
+                 'add' => true, 'delete' => true, 'columns' => [
+                     ['caption' => 'Variable', 'name' => 'VarID', 'width' => 'auto', 'add' => 0,
+                      'edit' => ['type' => 'SelectVariable']],
+                     ['caption' => 'Bezeichnung', 'name' => 'Name', 'width' => '180px', 'add' => '',
+                      'edit' => ['type' => 'ValidationTextBox']],
+                     ['caption' => 'Skala', 'name' => 'Typ', 'width' => '220px', 'add' => 0,
+                      'edit' => ['type' => 'Select', 'options' => [
+                          ['caption' => 'Prozent (hoch = feucht)', 'value' => 0],
+                          ['caption' => 'Zentibar (hoch = trocken)', 'value' => 1]]]],
                      ['caption' => 'aktiv', 'name' => 'Enabled', 'width' => '70px', 'add' => true,
                       'edit' => ['type' => 'CheckBox']],
                  ]],

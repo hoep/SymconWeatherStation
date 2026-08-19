@@ -62,6 +62,13 @@ final class WeatherEngine
         $fsi   = null;
         $spread = ($t !== null && $td !== null) ? $t - $td : null;
 
+        // Kann hier ueberhaupt Nebel stehen? Nebel ist Kondensation an der Luft: er braucht
+        // Saettigung, Windstille und darf kein Regen sein. Ist eine dieser Bedingungen
+        // verletzt, ist die Frage entschieden - dann darf auch keine Kamera "Nebel" daraus
+        // machen (siehe unten). Vorher konnte sie das, und genau daran kippte die Anzeige
+        // am 19.08.2026 bei 56 % Luftfeuchte und 8 K Taupunktdifferenz auf "Nebel".
+        $moeglich = false;
+
         if ($t === null || $rh === null || $spread === null || $ws === null) {
             $text = 'Sensoren unvollständig — Temperatur, Feuchte, Taupunkt und Wind nötig';
         } elseif ($mm > 0.01) {
@@ -72,7 +79,7 @@ final class WeatherEngine
             $text = sprintf('Wind %.0f km/h über %.0f km/h — Nebel hält sich nicht', $ws, $c['fogWind']);
         } elseif ($spread >= $c['fogSpread']) {
             $text = sprintf('Taupunktdifferenz %.1f K — ab %.1f K zu trocken', $spread, $c['fogSpread']);
-        } elseif ($hoehe === null) {
+        } elseif (($moeglich = true) && $hoehe === null) {
             $fsi   = round(2.0 * $spread, 1);
             $stufe = self::NEBEL_NEBEL;
             $text  = sprintf('Regelsatz erfüllt (Feuchte %.0f %%, Wind %.0f km/h, Spread %.1f K); '
@@ -84,13 +91,33 @@ final class WeatherEngine
                              $fsi, $spread, $t - $hoehe['t'], $hoehe['w']);
         }
 
-        if ($sicht !== null) {
-            if ($sicht <= $c['sightFog']) {
+        // ZWEI TORE VOR DER KAMERA.
+        //
+        // 1. LICHT: Die Sichtmessung vergleicht die Kantenenergie mit einem bei TAGESLICHT
+        //    gelernten Klarwert. In der Daemmerung faellt der Kontrast, weil das Licht fehlt,
+        //    nicht weil Nebel da waere - der Vergleich ist dann sinnlos. Am 19.08.2026 abends
+        //    gemessen: bei klarem Himmel und untergegangener Sonne meldeten die vier Kameras
+        //    44-56 % Sicht und einen Dunkelkanal von 60-73 statt nahe null (Verstaerkung und
+        //    IR-Licht heben das ganze Bild an). Beide Kennzahlen sind ohne Sonne unbrauchbar.
+        // 2. PHYSIK: Schliesst der Regelsatz Nebel aus (zu trocken, zu windig, Regen), darf die
+        //    Kamera die Stufe NICHT anheben. Ein dunkles oder kontrastarmes Bild ist dann eine
+        //    Beobachtung ueber das Licht, keine ueber die Luft.
+        //
+        // Herabstufen darf die Kamera weiterhin immer: freie Sicht widerlegt gerechneten Nebel.
+        $camLicht = !array_key_exists('camUsable', $c) || (bool) $c['camUsable'];
+        if ($sicht !== null && !$camLicht) {
+            $text .= sprintf(' | Kamera: Sicht %d %%, bei tiefer Sonne nicht beurteilbar — nicht gewertet',
+                             (int) $sicht);
+        } elseif ($sicht !== null) {
+            if ($sicht <= $c['sightFog'] && $moeglich) {
                 $stufe = max($stufe, self::NEBEL_DICHT);
                 $text .= sprintf(' | Kamera: Sicht %d %% des Klarwerts — gemessen dicht', (int) $sicht);
-            } elseif ($sicht <= $c['sightWarn']) {
+            } elseif ($sicht <= $c['sightWarn'] && $moeglich) {
                 $stufe = max($stufe, self::NEBEL_NEBEL);
                 $text .= sprintf(' | Kamera: Sicht %d %% — eingeschränkt', (int) $sicht);
+            } elseif ($sicht <= $c['sightWarn']) {
+                $text .= sprintf(' | Kamera: Sicht %d %%, aber Nebel ist hier ausgeschlossen — nicht gewertet',
+                                 (int) $sicht);
             } elseif ($stufe >= self::NEBEL_DIESIG) {
                 // DIE KAMERA SIEHT NACH, DER REGELSATZ RECHNET NUR.
                 //

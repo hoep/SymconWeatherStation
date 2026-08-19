@@ -221,6 +221,172 @@ final class Meteo
         return round($t + 0.33 * self::dampfdruck($t, $rh) - 0.70 * ($windKmh / 3.6) - 4.00, 1);
     }
 
+    /**
+     * WBGT — Wet Bulb Globe Temperature, das arbeitsmedizinische Mass fuer HITZEBELASTUNG
+     * (ISO 7243, in Deutschland Grundlage der DGUV-Grenzwerte).
+     *
+     * Die Messgroesse ist WBGT = 0,7*Tnw + 0,2*Tg + 0,1*Ta aus drei Fuehlern: einem feuchten,
+     * frei beluefteten Thermometer (70 Prozent Gewicht!), einer schwarzen Kugel und einem
+     * trockenen. Ohne Strahlungslast nimmt die Kugel die Lufttemperatur an (Tg = Ta), und die
+     * Definition faellt zusammen zu der Form, die wir hier rechnen:
+     *
+     *     WBGT = 0,7*Tw + 0,3*Ta          Tw = Feuchtkugel (psychrometrisch)
+     *
+     * Die Feuchtkugel haben wir bereits gemessen bzw. gerechnet - das ist die ehrlichste
+     * Grundlage und braucht keine fremden Anpassungskoeffizienten.
+     *
+     * VERWORFEN: die verbreitete Naeherung WBGT = 0,567*T + 0,393*e + 3,94 (Australisches BoM).
+     * Sie wird oft als "Schattenwert" ausgegeben, ist es aber NICHT: sie unterstellt maessig
+     * hohe Strahlung bei schwachem Wind und ueberschaetzt daher bei Bewoelkung, Wind und vor
+     * allem nachts. Gemessen am 19.08.2026 um 20:55 (Sonne unter dem Horizont, 24,1 Grad,
+     * Feuchtkugel 19,5): Naeherung 25,4 Grad, ISO-Form 20,9 Grad - 4,5 K Unterschied, und die
+     * Naeherung haette faelschlich "erhoehte Belastung" gemeldet.
+     *
+     * OFFEN: der Wert IN DER SONNE. Dafuer braucht es die Kugeltemperatur aus der
+     * Strahlungsbilanz (Liljegren 2008 iterativ, oder Dimiceli/Piltz/Amburn geschlossen).
+     * Beide brauchen Globalstrahlung, Wind und Sonnenzenit - alles vorhanden, aber die
+     * Koeffizienten gehoeren aus der Originalarbeit belegt, nicht geraten. Bis dahin gilt der
+     * hier gerechnete Wert OHNE Strahlungslast; in praller Sonne liegt der echte WBGT hoeher.
+     *
+     * Unterschied zur FEUCHTKUGEL selbst: die sagt, ob Schwitzen physikalisch noch kuehlen KANN
+     * (Ueberlebensgrenze 35 Grad). Der WBGT sagt, ab wann Arbeit oder Sport gefaehrlich wird -
+     * die Schwellen liegen deshalb viel tiefer.
+     */
+    public static function wbgt(float $t, float $rh): float
+    {
+        return round(0.7 * self::feuchtkugel($t, $rh) + 0.3 * $t, 1);
+    }
+
+    /**
+     * ET0 — Gras-Referenzverdunstung nach FAO-56 Penman-Monteith, STUNDENFORM (Gl. 53),
+     * Ergebnis in mm je Stunde.
+     *
+     * Das ist die Wassermenge, die eine gleichmaessig 12 cm hohe, gut versorgte Grasflaeche
+     * unter den gemessenen Bedingungen verdunstet - der internationale Bezugswert fuer
+     * Bewaesserung. Anders als die Verdunstungsangabe der Davis ist sie nachrechenbar und
+     * zwischen Anlagen vergleichbar.
+     *
+     *   ET0 = [0,408*D*(Rn-G) + g*(37/(T+273))*u2*(es-ea)] / [D + g*(1 + 0,34*u2)]
+     *
+     * D  Steigung der Saettigungsdampfdruckkurve [kPa/K]
+     * g  Psychrometerkonstante 0,665e-3 * P [kPa/K]
+     * Rn Nettostrahlung [MJ/m2/h], G Bodenwaermestrom (0,1*Rn tags, 0,5*Rn nachts)
+     * u2 Wind in 2 m Hoehe [m/s], es-ea Dampfdruckdefizit [kPa]
+     *
+     * NETTOSTRAHLUNG: Rn = (1-0,23)*Rs - Rnl, mit der langwelligen Ausstrahlung
+     *   Rnl = s*(T+273,16)^4 * (0,34 - 0,14*sqrt(ea)) * (1,35*Rs/Rso - 0,35).
+     * Der Term Rs/Rso beschreibt die Bewoelkung. NACHTS ist er nicht bestimmbar (Rso = 0);
+     * FAO-56 sagt dafuer ausdruecklich, das Verhaeltnis der letzten Tagesstunden zu verwenden -
+     * genau dafuer ist $ratio da. Fehlt es, wird 0,8 (leicht bewoelkt) angenommen; das ist
+     * eine Annahme und keine Messung, sie steht deshalb im Rueckgabewert.
+     *
+     * @param float      $u2    Wind in 2 m Hoehe in m/s (siehe windAuf2m())
+     * @param float      $rs    gemessene Globalstrahlung W/m2
+     * @param float      $rso   Klarhimmelstrahlung W/m2 (aus klarhimmel())
+     * @param float|null $ratio zuletzt tagsueber gemessenes Rs/Rso, fuer die Nachtstunden
+     * @return array{et0:float,ratio:float|null,nacht:bool}
+     */
+    public static function et0(float $t, float $rh, float $u2, float $rs,
+                               float $pHpa, float $rso, ?float $ratio = null): array
+    {
+        $es = self::dampfdruck($t, 100.0) / 10.0;        // kPa
+        $ea = self::dampfdruck($t, $rh) / 10.0;          // kPa
+        $D  = 4098.0 * $es / pow($t + 237.3, 2);         // kPa/K
+        $g  = 0.000665 * ($pHpa / 10.0);                 // kPa/K
+        $u2 = max(0.0, $u2);
+
+        $rsMJ  = max(0.0, $rs) * 3600.0 / 1e6;           // W/m2 -> MJ/m2/h
+        $rsoMJ = max(0.0, $rso) * 3600.0 / 1e6;
+        $tag   = $rsoMJ > 0.01;
+        $q     = $tag ? max(0.0, min(1.0, $rsMJ / $rsoMJ)) : null;
+        $qEff  = $tag ? $q : ($ratio ?? 0.8);
+
+        $rns = 0.77 * $rsMJ;                              // Albedo Gras 0,23
+        $rnl = 2.043e-10 * pow($t + 273.16, 4)
+             * (0.34 - 0.14 * sqrt(max(0.0, $ea)))
+             * (1.35 * max(0.0, min(1.0, $qEff)) - 0.35);
+        $rn  = $rns - $rnl;
+        $G   = $tag ? 0.1 * $rn : 0.5 * $rn;
+
+        $zaehler = 0.408 * $D * ($rn - $G) + $g * (37.0 / ($t + 273.0)) * $u2 * ($es - $ea);
+        $nenner  = $D + $g * (1.0 + 0.34 * $u2);
+        return ['et0' => round($nenner > 0 ? $zaehler / $nenner : 0.0, 4),
+                'ratio' => $q, 'nacht' => !$tag];
+    }
+
+    /**
+     * Wind auf 2 m Hoehe umrechnen (FAO-56 Gl. 47): u2 = uz * 4,87 / ln(67,8z - 5,42).
+     * Ohne diesen Schritt ueberschaetzt ein 10-m-Mast die Verdunstung deutlich.
+     */
+    public static function windAuf2m(float $windKmh, float $hoeheM): float
+    {
+        $u = max(0.0, $windKmh) / 3.6;
+        if ($hoeheM <= 0.0 || abs($hoeheM - 2.0) < 0.01) { return $u; }
+        return $u * 4.87 / log(67.8 * $hoeheM - 5.42);
+    }
+
+    /**
+     * DAMPFDRUCKDEFIZIT (VPD) in hPa: Saettigungsdampfdruck minus tatsaechlicher Dampfdruck.
+     *
+     * Das Mass fuer den Trocknungsdruck der Luft. Pflanzen steuern danach ihre Spaltoeffnungen:
+     * unter etwa 4 hPa steht die Luft (Pilzdruck, kaum Verdunstung), 4-12 hPa ist der
+     * Wohlfuehlbereich, ueber 16 hPa schliessen viele Pflanzen die Spalten und stellen das
+     * Wachstum ein - dann nuetzt auch Giessen wenig, weil die Wurzel nicht nachliefern kann.
+     *
+     * Anders als die relative Feuchte ist es die Groesse, die tatsaechlich antreibt: 60 % bei
+     * 30 Grad trocknen weit staerker als 60 % bei 10 Grad.
+     */
+    public static function vpd(float $t, float $rh): float
+    {
+        $sat = self::dampfdruck($t, 100.0);
+        return round(max(0.0, $sat - self::dampfdruck($t, $rh)), 2);
+    }
+
+    /**
+     * KUEHLRESERVE (Verdunstungskaelte) in Kelvin: T - Tw.
+     *
+     * Der Abstand zwischen Luft- und Feuchtkugeltemperatur ist genau die Kuehlung, die
+     * Verdunstung noch leisten KANN - beim Menschen also das Schwitzen. Er faellt mit
+     * steigender Luftfeuchte gegen null; bei null ist die Luft gesaettigt, Schweiss verdunstet
+     * nicht mehr und die Koerperkerntemperatur steigt unweigerlich.
+     *
+     * Die Feuchtkugel liegt immer zwischen Taupunkt und Lufttemperatur - deshalb sind
+     * Taupunkt, Temperatur und Feuchtkugel dieselbe Aussage aus drei Blickwinkeln, und die
+     * Differenz ist die eigentliche Kennzahl der Hitzebelastung durch Schwuele.
+     */
+    public static function kuehlreserve(float $t, float $rh): float
+    {
+        return round($t - self::feuchtkugel($t, $rh), 1);
+    }
+
+    /**
+     * Stufe der Kuehlreserve. Die Grenzen folgen der Aussage der Feuchtkugel-Gefahrenzonen:
+     * viel Abstand = Schweiss kuehlt wirksam, kein Abstand = keine Kuehlung mehr moeglich.
+     * @return array{stufe:int,name:string,hinweis:string}
+     */
+    public static function kuehlstufe(float $dt): array
+    {
+        if ($dt >= 10.0) { return ['stufe' => 0, 'name' => 'reichlich', 'hinweis' => 'Schweiß kühlt wirksam']; }
+        if ($dt >= 6.0)  { return ['stufe' => 1, 'name' => 'gut',       'hinweis' => 'Kühlung funktioniert']; }
+        if ($dt >= 3.0)  { return ['stufe' => 2, 'name' => 'knapp',     'hinweis' => 'schwül, Kühlreserve sinkt']; }
+        if ($dt >= 1.0)  { return ['stufe' => 3, 'name' => 'kaum',      'hinweis' => 'Anstrengung meiden']; }
+        return ['stufe' => 4, 'name' => 'keine', 'hinweis' => 'Luft gesättigt — Schwitzen kühlt nicht mehr'];
+    }
+
+    /**
+     * Belastungsstufe aus dem WBGT, angelehnt an ISO 7243 / DGUV fuer mittlere Arbeitsschwere
+     * bei akklimatisierten Personen. 0 unbedenklich, 1 erhoeht, 2 hoch, 3 sehr hoch, 4 extrem.
+     * @return array{stufe:int,name:string,hinweis:string}
+     */
+    public static function hitzestufe(float $wbgt): array
+    {
+        if ($wbgt < 25.0) { return ['stufe' => 0, 'name' => 'unbedenklich', 'hinweis' => 'keine Einschränkung']; }
+        if ($wbgt < 28.0) { return ['stufe' => 1, 'name' => 'erhöht',       'hinweis' => 'regelmäßig trinken']; }
+        if ($wbgt < 30.0) { return ['stufe' => 2, 'name' => 'hoch',         'hinweis' => 'Pausen im Schatten']; }
+        if ($wbgt < 32.0) { return ['stufe' => 3, 'name' => 'sehr hoch',    'hinweis' => 'schwere Arbeit meiden']; }
+        return ['stufe' => 4, 'name' => 'extrem', 'hinweis' => 'Arbeit im Freien einstellen'];
+    }
+
     /** Windrichtung als Himmelsrichtung, 16 Sektoren. */
     public static function windrichtungText(float $grad): string
     {
