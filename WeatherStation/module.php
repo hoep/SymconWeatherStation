@@ -565,9 +565,15 @@ class WeatherStation extends IPSModule
             if ($mid <= 0) {
                 continue;
             }
+            // Die Grabber heissen reihum "Image"; das ist kein Name, sondern der
+            // Vorgabename des Medienobjekts. Dann lieber die Instanz darueber.
             $name = trim((string) ($c['Name'] ?? ''));
+            if (($name === '' || $name === 'Image') && @IPS_ObjectExists($mid)) {
+                $eltern = IPS_GetParent($mid);
+                $name = ($eltern > 0) ? IPS_GetName($eltern) : IPS_GetName($mid);
+            }
             if ($name === '') {
-                $name = @IPS_ObjectExists($mid) ? IPS_GetName($mid) : ('#' . $mid);
+                $name = '#' . $mid;
             }
             $groesse = '';
             if (@IPS_MediaExists($mid)) {
@@ -618,6 +624,12 @@ class WeatherStation extends IPSModule
             //                         keine Sichtweite messen
             $eltern = IPS_GetParent($mid);
             if ($eltern <= 0 || IPS_GetObject($eltern)['ObjectType'] !== 1) {
+                continue;
+            }
+            // Nur Standbilder. Ein GIF ist im Bestand die Jahresgrafik der
+            // Daemmerung - sie erneuert sich, kommt von einer Instanz und ist gross
+            // genug, waere also durch alle anderen Pruefungen gerutscht.
+            if (!in_array(strtolower((string) pathinfo($datei, PATHINFO_EXTENSION)), ['jpg', 'jpeg', 'png'], true)) {
                 continue;
             }
             $pfad = IPS_GetKernelDir() . $datei;
