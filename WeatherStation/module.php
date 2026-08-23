@@ -541,6 +541,179 @@ class WeatherStation extends IPSModule
              . 'die Sichtmessung meldet bis dahin volle Sicht.';
     }
 
+    /**
+     * Die Kameras samt Messfeld und letzter Messung - Grundlage fuer das Werkzeug,
+     * mit dem das Feld gezogen wird.
+     *
+     * Warum ueberhaupt ein Werkzeug: das Feld steht als vier Prozentzahlen in der
+     * Instanz, und vier Prozentzahlen sagen niemandem, was er misst. Am 23.08.2026
+     * standen alle vier Kameras auf dem GANZEN Bild - also zum grossen Teil auf dem
+     * Himmel, und genau dessen Streulicht hebt den Dunkelkanal an. Bei klarer Sicht
+     * mass das Poolhaus 79 von 110, die Schwelle fuer dichten Nebel.
+     */
+    public function Messfelder(): string
+    {
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        $base = json_decode($this->ReadAttributeString('CamBase'), true);
+        $letzte = [];
+        foreach ((json_decode((string) $this->GetValue('CamTable'), true) ?: []) as $z) {
+            $letzte[(int) ($z['id'] ?? 0)] = $z;
+        }
+        $out = [];
+        foreach (is_array($cams) ? $cams : [] as $c) {
+            $mid = (int) ($c['MediaID'] ?? 0);
+            if ($mid <= 0) {
+                continue;
+            }
+            $name = trim((string) ($c['Name'] ?? ''));
+            if ($name === '') {
+                $name = @IPS_ObjectExists($mid) ? IPS_GetName($mid) : ('#' . $mid);
+            }
+            $groesse = '';
+            if (@IPS_MediaExists($mid)) {
+                $g = @getimagesizefromstring(base64_decode((string) @IPS_GetMediaContent($mid)));
+                if ($g) { $groesse = $g[0] . 'x' . $g[1]; }
+            }
+            $out[] = [
+                'id' => $mid, 'name' => $name, 'aktiv' => !empty($c['Enabled']),
+                'x' => (float) ($c['X'] ?? 0), 'y' => (float) ($c['Y'] ?? 0),
+                'w' => (float) ($c['W'] ?? 100), 'h' => (float) ($c['H'] ?? 100),
+                'groesse' => $groesse,
+                'klarwertTag' => (float) ($base[$mid . 'd'] ?? 0),
+                'klarwertNacht' => (float) ($base[$mid . 'n'] ?? 0),
+                'letzte' => $letzte[$mid] ?? null,
+            ];
+        }
+        return json_encode(['ok' => true, 'kameras' => $out,
+                            'schwellen' => CameraVision::schwellen(),
+                            'sonne' => round(Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'),
+                                                                $this->ReadPropertyFloat('Lon')), 1)],
+                           JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Was ein Feld GERADE misst - ohne es zu speichern.
+     *
+     * Angaben in Prozent wie in der Instanz, damit im Werkzeug und im Formular
+     * dieselben Zahlen stehen.
+     */
+    public function MessfeldPruefen(int $MediaID, float $X, float $Y, float $W, float $H): string
+    {
+        $m = $this->messeFeld($MediaID, $X, $Y, $W, $H);
+        if ($m === null) {
+            return json_encode(['ok' => false, 'fehler' => 'kein auswertbares Bild']);
+        }
+        return json_encode(['ok' => true, 'messung' => $m,
+                            'schwellen' => CameraVision::schwellen()], JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Feld uebernehmen.
+     *
+     * Der gelernte Klarwert DIESER Kamera faellt dabei weg - er gehoert zum alten
+     * Feld. Wer ihn stehen liesse, vergliche die Kontrastdichte eines Zauns mit der
+     * einer Wiese und bekaeme am naechsten klaren Morgen "Sicht eingeschraenkt".
+     */
+    public function MessfeldSetzen(int $MediaID, float $X, float $Y, float $W, float $H): string
+    {
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        if (!is_array($cams)) {
+            return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
+        }
+        $gefunden = false;
+        foreach ($cams as &$c) {
+            if ((int) ($c['MediaID'] ?? 0) !== $MediaID) {
+                continue;
+            }
+            $c['X'] = (int) round(max(0, min(95, $X)));
+            $c['Y'] = (int) round(max(0, min(95, $Y)));
+            $c['W'] = (int) round(max(5, min(100, $W)));
+            $c['H'] = (int) round(max(5, min(100, $H)));
+            $gefunden = true;
+        }
+        unset($c);
+        if (!$gefunden) {
+            return json_encode(['ok' => false, 'fehler' => 'Kamera steht nicht in der Liste']);
+        }
+        $base = json_decode($this->ReadAttributeString('CamBase'), true);
+        if (is_array($base)) {
+            unset($base[$MediaID . 'd'], $base[$MediaID . 'n']);
+            $this->WriteAttributeString('CamBase', json_encode($base));
+        }
+        IPS_SetProperty($this->InstanceID, 'Cameras', json_encode(array_values($cams)));
+        IPS_ApplyChanges($this->InstanceID);
+        return json_encode(['ok' => true, 'hinweis' => 'Feld gesetzt, Klarwert dieser Kamera verworfen'],
+                           JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Felder vorschlagen: Kandidaten durchmessen und die besten zurueckgeben.
+     *
+     * Bewertet wird, was ein Nebelfuehler koennen muss - NICHT, was huebsch aussieht:
+     *   Dunkelkanal niedrig   Abstand zur Nebelschwelle; der Himmel verspielt ihn
+     *   Kontrastdichte hoch   feste Struktur, an der ein Kontrastverlust auffaellt
+     *   hell genug            unter 60 ist jede Aussage geraten
+     *   grosszuegig           ein grosses Feld ist unempfindlicher gegen einen Ast im Wind
+     *
+     * Der Vorschlag taugt nur bei TAGESLICHT. Nachts ist der Dunkelkanal ueberall
+     * niedrig, und das Ergebnis waere ein Feld, das tagsueber in den Himmel zeigt.
+     */
+    public function MessfeldVorschlag(int $MediaID): string
+    {
+        $sonne = Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'), $this->ReadPropertyFloat('Lon'));
+        $kand = [];
+        foreach ([0.0, 0.15, 0.3, 0.45] as $x) {
+            foreach ([0.0, 0.2, 0.35, 0.5] as $y) {
+                foreach ([0.35, 0.5, 0.7, 1.0] as $w) {
+                    foreach ([0.3, 0.45, 0.65] as $h) {
+                        if ($x + $w > 1.0001 || $y + $h > 1.0001) {
+                            continue;
+                        }
+                        $m = $this->messeFeld($MediaID, $x * 100, $y * 100, $w * 100, $h * 100);
+                        if ($m === null) {
+                            continue;
+                        }
+                        $kand[] = ['x' => round($x * 100), 'y' => round($y * 100),
+                                   'w' => round($w * 100), 'h' => round($h * 100),
+                                   'note' => $this->note($m), 'messung' => $m];
+                    }
+                }
+            }
+        }
+        usort($kand, static fn(array $a, array $b): int => $b['note'] <=> $a['note']);
+        return json_encode(['ok' => true, 'tageslicht' => $sonne >= self::CAM_SUN_MIN,
+                            'sonne' => round($sonne, 1),
+                            'vorschlaege' => array_slice($kand, 0, 5),
+                            'geprueft' => count($kand)], JSON_UNESCAPED_UNICODE);
+    }
+
+    /** Note eines Feldes als Nebelfuehler, 0..100. */
+    private function note(array $m): int
+    {
+        $s = CameraVision::schwellen();
+        $dunkel  = max(0.0, min(1.0, 1.0 - ((float) $m['dunkel'] - $s['dkKlar']) / max(1.0, $s['dkNebel'] - $s['dkKlar'])));
+        $dichte  = max(0.0, min(1.0, (float) $m['dichte'] / max(0.001, $s['konKlar'] * 2)));
+        $hell    = ((float) $m['helligkeit'] >= $s['minHell']) ? 1.0 : 0.0;
+        $flaeche = max(0.0, min(1.0, (float) ($m['anteil'] ?? 0) / 0.5));
+        return (int) round(100 * (0.45 * $dunkel + 0.35 * $dichte + 0.12 * $hell + 0.08 * $flaeche));
+    }
+
+    /** @return array<string,mixed>|null */
+    private function messeFeld(int $mid, float $x, float $y, float $w, float $h): ?array
+    {
+        if ($mid <= 0 || !@IPS_MediaExists($mid)) {
+            return null;
+        }
+        $bin = base64_decode((string) @IPS_GetMediaContent($mid));
+        $roi = $this->roi(['X' => $x, 'Y' => $y, 'W' => $w, 'H' => $h]);
+        $m = CameraVision::messen($bin, $roi);
+        if ($m === null) {
+            return null;
+        }
+        $m['anteil'] = round(($w / 100) * ($h / 100), 3);
+        return $m;
+    }
+
     public function TestRun(): string
     {
         $t0 = microtime(true);

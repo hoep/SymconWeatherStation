@@ -56,6 +56,23 @@ final class CameraVision
     {
     }
 
+    /**
+     * Die Schwellen, gegen die gerechnet wird.
+     *
+     * Nach aussen gegeben, damit das Werkzeug zum Ziehen des Messfeldes DIESELBEN
+     * Zahlen anzeigt. Zwei Quellen fuer eine Schwelle waeren zwei Wahrheiten - und
+     * die eine davon veraltet beim naechsten Kalibrieren still.
+     *
+     * @return array{minHell:float,dkKlar:float,dkNebel:float,satKlar:float,satNebel:float,konKlar:float,konNebel:float}
+     */
+    public static function schwellen(): array
+    {
+        return ['minHell' => self::SIG_MIN_HELL,
+                'dkKlar' => self::SIG_DK_KLAR, 'dkNebel' => self::SIG_DK_NEBEL,
+                'satKlar' => self::SIG_SAT_KLAR, 'satNebel' => self::SIG_SAT_NEBEL,
+                'konKlar' => self::SIG_KON_KLAR, 'konNebel' => self::SIG_KON_NEBEL];
+    }
+
     public static function verfuegbar(): bool
     {
         return function_exists('imagecreatefromstring') && function_exists('imagecolorat');
