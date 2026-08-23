@@ -585,10 +585,128 @@ class WeatherStation extends IPSModule
             ];
         }
         return json_encode(['ok' => true, 'kameras' => $out,
+                            'verfuegbar' => $this->bildquellen(array_column($out, 'id')),
                             'schwellen' => CameraVision::schwellen(),
                             'sonne' => round(Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'),
                                                                 $this->ReadPropertyFloat('Lon')), 1)],
                            JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Alle Bildquellen im Objektbaum, die sich als Kamera eignen.
+     *
+     * Gezeigt wird der ganze Weg im Baum, nicht nur der Name: die Grabber heissen
+     * reihum "Image", und zwoelf Zeilen "Image" sind keine Auswahl.
+     *
+     * @param list<int> $schon bereits gebundene Medien
+     * @return list<array<string,mixed>>
+     */
+    private function bildquellen(array $schon): array
+    {
+        $out = [];
+        foreach (IPS_GetMediaListByType(1) as $mid) {   // 1 = Bild
+            $m = IPS_GetMedia($mid);
+            $datei = (string) ($m['MediaFile'] ?? '');
+            // Nur was tatsaechlich ein Kamerabild sein kann. Icons und Grafiken aus
+            // Modulordnern sind Medien vom selben Typ, taugen aber nicht zum Messen.
+            if ($datei === '' || str_contains($datei, 'modules/')) {
+                continue;
+            }
+            $pfad = [];
+            $p = IPS_GetParent($mid);
+            while ($p > 0) { $pfad[] = IPS_GetName($p); $p = IPS_GetParent($p); }
+            $g = @getimagesizefromstring(base64_decode((string) @IPS_GetMediaContent($mid)));
+            $out[] = ['id' => $mid,
+                      'name' => IPS_GetName($mid),
+                      'ort' => implode(' \\ ', array_reverse($pfad)),
+                      'groesse' => $g ? ($g[0] . 'x' . $g[1]) : '',
+                      'gebunden' => in_array($mid, $schon, true)];
+        }
+        usort($out, static fn(array $a, array $b): int => strnatcasecmp($a['ort'] . $a['name'], $b['ort'] . $b['name']));
+        return $out;
+    }
+
+    /**
+     * Eine Bildquelle als Kamera aufnehmen.
+     *
+     * Neu aufgenommen wird mit dem GANZEN Bild - das ist die ehrliche Vorgabe: erst
+     * messen, dann das Feld setzen. Ein geratener Ausschnitt waere schlimmer als
+     * keiner, weil er wie eine Entscheidung aussieht.
+     */
+    public function KameraBinden(int $MediaID): string
+    {
+        if ($MediaID <= 0 || !@IPS_MediaExists($MediaID)) {
+            return json_encode(['ok' => false, 'fehler' => 'Medienobjekt gibt es nicht']);
+        }
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        if (!is_array($cams)) { $cams = []; }
+        foreach ($cams as &$c) {
+            if ((int) ($c['MediaID'] ?? 0) === $MediaID) {
+                $c['Enabled'] = true;
+                unset($c);
+                $this->kamerasSchreiben($cams);
+                return json_encode(['ok' => true, 'hinweis' => 'war schon gebunden, jetzt aktiv']);
+            }
+        }
+        unset($c);
+        $name = IPS_GetName($MediaID);
+        $eltern = IPS_GetParent($MediaID);
+        if (($name === '' || $name === 'Image') && $eltern > 0) {
+            $name = IPS_GetName($eltern);          // "Image" unter "3-Grabber West" sagt nichts
+        }
+        $cams[] = ['MediaID' => $MediaID, 'Name' => $name, 'X' => 0, 'Y' => 0,
+                   'W' => 100, 'H' => 100, 'Enabled' => true];
+        $this->kamerasSchreiben($cams);
+        return json_encode(['ok' => true, 'hinweis' => 'aufgenommen mit dem ganzen Bild - Feld noch setzen'],
+                           JSON_UNESCAPED_UNICODE);
+    }
+
+    /** Kamera wieder herausnehmen - samt ihrem gelernten Klarwert. */
+    public function KameraLoesen(int $MediaID): string
+    {
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        if (!is_array($cams)) {
+            return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
+        }
+        $neu = array_values(array_filter($cams,
+            static fn(array $c): bool => (int) ($c['MediaID'] ?? 0) !== $MediaID));
+        if (count($neu) === count($cams)) {
+            return json_encode(['ok' => false, 'fehler' => 'Kamera steht nicht in der Liste']);
+        }
+        $base = json_decode($this->ReadAttributeString('CamBase'), true);
+        if (is_array($base)) {
+            unset($base[$MediaID . 'd'], $base[$MediaID . 'n']);
+            $this->WriteAttributeString('CamBase', json_encode($base));
+        }
+        $this->kamerasSchreiben($neu);
+        return json_encode(['ok' => true, 'hinweis' => 'herausgenommen'], JSON_UNESCAPED_UNICODE);
+    }
+
+    /** Kamera stilllegen oder wieder mitrechnen lassen. */
+    public function KameraAktiv(int $MediaID, bool $Aktiv): string
+    {
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        if (!is_array($cams)) {
+            return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
+        }
+        $gefunden = false;
+        foreach ($cams as &$c) {
+            if ((int) ($c['MediaID'] ?? 0) === $MediaID) { $c['Enabled'] = $Aktiv; $gefunden = true; }
+        }
+        unset($c);
+        if (!$gefunden) {
+            return json_encode(['ok' => false, 'fehler' => 'Kamera steht nicht in der Liste']);
+        }
+        $this->kamerasSchreiben($cams);
+        return json_encode(['ok' => true, 'hinweis' => $Aktiv ? 'zaehlt wieder mit' : 'stillgelegt'],
+                           JSON_UNESCAPED_UNICODE);
+    }
+
+    /** @param list<array<string,mixed>> $cams */
+    private function kamerasSchreiben(array $cams): void
+    {
+        IPS_SetProperty($this->InstanceID, 'Cameras', json_encode(array_values($cams)));
+        IPS_ApplyChanges($this->InstanceID);
     }
 
     /**
