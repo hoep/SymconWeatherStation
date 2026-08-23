@@ -605,21 +605,38 @@ class WeatherStation extends IPSModule
     {
         $out = [];
         foreach (IPS_GetMediaListByType(1) as $mid) {   // 1 = Bild
-            $m = IPS_GetMedia($mid);
-            $datei = (string) ($m['MediaFile'] ?? '');
-            // Nur was tatsaechlich ein Kamerabild sein kann. Icons und Grafiken aus
-            // Modulordnern sind Medien vom selben Typ, taugen aber nicht zum Messen.
-            if ($datei === '' || str_contains($datei, 'modules/')) {
+            $datei = (string) (IPS_GetMedia($mid)['MediaFile'] ?? '');
+            if ($datei === '') {
                 continue;
             }
-            $pfad = [];
-            $p = IPS_GetParent($mid);
-            while ($p > 0) { $pfad[] = IPS_GetName($p); $p = IPS_GetParent($p); }
-            $g = @getimagesizefromstring(base64_decode((string) @IPS_GetMediaContent($mid)));
+            // Drei Bedingungen, und jede sortiert etwas anderes aus. Von 81 Bildern
+            // im Baum bleiben damit die zwoelf Kameras uebrig:
+            //   Eltern = INSTANZ   -> es kommt von Geraet, nicht aus dem Dateisystem
+            //                         (Raumbilder, Diagramme, Icons fallen weg)
+            //   frisch             -> ein Picon aendert sich nie, ein Kamerabild staendig
+            //   gross genug        -> die Mondansicht ist 100x100; darauf laesst sich
+            //                         keine Sichtweite messen
+            $eltern = IPS_GetParent($mid);
+            if ($eltern <= 0 || IPS_GetObject($eltern)['ObjectType'] !== 1) {
+                continue;
+            }
+            $pfad = IPS_GetKernelDir() . $datei;
+            $alter = @is_file($pfad) ? (time() - (int) filemtime($pfad)) : null;
+            if ($alter === null || $alter > 86400) {
+                continue;
+            }
+            $g = @getimagesize($pfad);
+            if (!$g || $g[0] < 320) {
+                continue;
+            }
+            $baum = [];
+            $p = $eltern;
+            while ($p > 0) { $baum[] = IPS_GetName($p); $p = IPS_GetParent($p); }
             $out[] = ['id' => $mid,
                       'name' => IPS_GetName($mid),
-                      'ort' => implode(' \\ ', array_reverse($pfad)),
-                      'groesse' => $g ? ($g[0] . 'x' . $g[1]) : '',
+                      'ort' => implode(' \\ ', array_reverse($baum)),
+                      'groesse' => $g[0] . 'x' . $g[1],
+                      'alterMin' => (int) round($alter / 60),
                       'gebunden' => in_array($mid, $schon, true)];
         }
         usort($out, static fn(array $a, array $b): int => strnatcasecmp($a['ort'] . $a['name'], $b['ort'] . $b['name']));
