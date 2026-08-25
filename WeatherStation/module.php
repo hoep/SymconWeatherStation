@@ -343,6 +343,11 @@ class WeatherStation extends IPSModule
                 // Nacht ab -6 Grad (Ende der buergerlichen Daemmerung, ab da leuchtet das IR).
                 // Dazwischen bleibt die Kamera stumm - wie bisher, aber nur noch dort.
                 'camUsable' => ($hoehe >= self::CAM_SUN_MIN) || ($hoehe <= self::CAM_NIGHT_MAX),
+                // Nachts ist ein MASSVOLLER Sichtverlust kein Beleg: das Infrarot leuchtet nur
+                // die Nahzone aus, das Fernfeld lebt vom Himmelslicht. Unter dichter Bewoelkung
+                // ist es dort dunkler und kantenaermer als in einer klaren oder mondhellen
+                // Nacht - und gegen so eine Nacht ist der Klarwert gelernt (Bestmarke).
+                'camNacht' => $hoehe <= self::CAM_NIGHT_MAX,
                 'stormNearKm' => $this->ReadPropertyInteger('StormNearKm'),
                 'stormNearMin' => $this->ReadPropertyInteger('StormNearMin'),
                 'stormFarKm' => $this->ReadPropertyInteger('StormFarKm'),

@@ -137,10 +137,24 @@ final class WeatherEngine
                 // Kamera bei gerechnetem Dunst gar nicht erst gefragt, und "diesig" bleibt
                 // stehen, obwohl sie freie Sicht meldet.
                 $klar = ($c['sightWarn'] + 100.0) / 2.0;
-                $stufe = ($sicht > $klar) ? self::NEBEL_KEIN : self::NEBEL_DIESIG;
-                $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — %s', (int) $sicht, $klar,
-                                 $stufe === self::NEBEL_KEIN ? 'gemessen klar, gerechnete Stufe verworfen'
-                                                             : 'gerechnete Stufe auf Dunst zurückgenommen');
+                // NACHTS zaehlt nur der klare Befund, nicht die Zwischenlage. Das Infrarot
+                // leuchtet die Nahzone aus, das Fernfeld haengt am Himmelslicht: unter dichter
+                // Bewoelkung ist es dort dunkler und kantenaermer als in der mondhellen Nacht,
+                // gegen die der Klarwert als Bestmarke gelernt wurde. Ein Wert zwischen "dicht"
+                // und "klar" ist dann eine Aussage ueber die WOLKEN, nicht ueber die Luft.
+                // Gemessen am 25.08.2026: 67 % bei stark bewoelktem, aber klar sichtigem Himmel.
+                $nachts = !empty($c['camNacht']);
+                if ($sicht > $klar) {
+                    $stufe = self::NEBEL_KEIN;
+                    $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — gemessen klar, gerechnete Stufe verworfen', (int) $sicht, $klar);
+                } elseif ($nachts) {
+                    $stufe = self::NEBEL_KEIN;
+                    $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — nachts nicht aussagekräftig, '
+                                   . 'Bewölkung verdunkelt das Fernfeld; gerechnete Stufe verworfen', (int) $sicht, $klar);
+                } else {
+                    $stufe = self::NEBEL_DIESIG;
+                    $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — gerechnete Stufe auf Dunst zurückgenommen', (int) $sicht, $klar);
+                }
             }
         }
 
@@ -153,9 +167,9 @@ final class WeatherEngine
         //
         // Hat keine Kamera etwas beigetragen, darf daraus hoechstens ein HINWEIS werden.
         // Behaupten, was man nicht gesehen hat, ist der Fehler - nicht die Rechnung selbst.
-        if ($stufe > self::NEBEL_DIESIG && ($sicht === null || !$camLicht)) {
-            $stufe = self::NEBEL_DIESIG;
-            $text .= ' | keine Sichtmessung — gerechnet, nicht gesehen, daher nur Hinweis';
+        if ($stufe > self::NEBEL_KEIN && ($sicht === null || !$camLicht)) {
+            $stufe = self::NEBEL_KEIN;
+            $text .= ' | keine Sichtmessung — gerechnet, nicht gesehen, daher keine Meldung';
         }
 
         return ['stufe' => $stufe, 'fsi' => $fsi, 'text' => $text];
