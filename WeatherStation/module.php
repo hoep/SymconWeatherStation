@@ -34,6 +34,8 @@ class WeatherStation extends IPSModule
      * Der Regelsatz (Feuchte, Taupunktdifferenz, Wind) arbeitet rund um die Uhr weiter.
      */
     private const CAM_SUN_MIN = 5.0;
+    /** Ab dieser Sonnenhoehe abwaerts ist es richtig Nacht: IR leuchtet, der Nacht-Klarwert gilt. */
+    private const CAM_NIGHT_MAX = -6.0;
 
     /**
      * Mindestdauer (Sekunden), die eine geaenderte Nebelstufe anhalten muss, bevor sie
@@ -330,10 +332,17 @@ class WeatherStation extends IPSModule
                 'fogSpread' => $this->ReadPropertyFloat('FogSpread'),
                 'sightWarn' => $this->ReadPropertyInteger('SightWarn'),
                 'sightFog' => $this->ReadPropertyInteger('SightFog'),
-                // Die Kamera zaehlt nur, solange die Sonne hoch genug steht. Der Klarwert, gegen
-                // den ihre Sicht gerechnet wird, ist bei Tageslicht gelernt; in der Daemmerung
-                // faellt der Kontrast wegen des Lichts, nicht wegen Nebels.
-                'camUsable' => $hoehe >= self::CAM_SUN_MIN,
+                // Wann darf die Kamera mitreden? Nicht "nur bei Tageslicht" - die Kameras haben
+                // INFRAROTBELEUCHTUNG und sehen nachts sehr wohl etwas. Der Klarwert wird
+                // ohnehin getrennt fuer Tag und Nacht gelernt (siehe kameras($nacht)), es wird
+                // also Gleiches mit Gleichem verglichen. Wertlos ist allein die DAEMMERUNG:
+                // dort ist es fuer das Tagbild zu dunkel und fuer das IR-Bild zu hell, die
+                // Kamera schaltet mittendrin um, und keiner der beiden Klarwerte passt.
+                //
+                // Deshalb zwei Fenster statt einer Schwelle: Tag ab +5 Grad Sonnenhoehe,
+                // Nacht ab -6 Grad (Ende der buergerlichen Daemmerung, ab da leuchtet das IR).
+                // Dazwischen bleibt die Kamera stumm - wie bisher, aber nur noch dort.
+                'camUsable' => ($hoehe >= self::CAM_SUN_MIN) || ($hoehe <= self::CAM_NIGHT_MAX),
                 'stormNearKm' => $this->ReadPropertyInteger('StormNearKm'),
                 'stormNearMin' => $this->ReadPropertyInteger('StormNearMin'),
                 'stormFarKm' => $this->ReadPropertyInteger('StormFarKm'),

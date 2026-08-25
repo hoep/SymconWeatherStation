@@ -143,6 +143,21 @@ final class WeatherEngine
                                                              : 'gerechnete Stufe auf Dunst zurückgenommen');
             }
         }
+
+        // OHNE SICHTMESSUNG IST DAS EINE RECHNUNG, KEINE BEOBACHTUNG.
+        //
+        // Der FSI ist ein VORHERSAGE-Index: er sagt, wie stabil eine Nebelschicht waere,
+        // wenn sie sich bildet - nicht, ob gerade Nebel steht. In einer klaren, windstillen
+        // Nacht mit 94 % Feuchte und 1 K Taupunktdifferenz faellt er unter 31, und die Anlage
+        // meldete daraufhin "dichter Nebel", waehrend man bis zum Zaun sah (25.08.2026).
+        //
+        // Hat keine Kamera etwas beigetragen, darf daraus hoechstens ein HINWEIS werden.
+        // Behaupten, was man nicht gesehen hat, ist der Fehler - nicht die Rechnung selbst.
+        if ($stufe > self::NEBEL_DIESIG && ($sicht === null || !$camLicht)) {
+            $stufe = self::NEBEL_DIESIG;
+            $text .= ' | keine Sichtmessung — gerechnet, nicht gesehen, daher nur Hinweis';
+        }
+
         return ['stufe' => $stufe, 'fsi' => $fsi, 'text' => $text];
     }
 
