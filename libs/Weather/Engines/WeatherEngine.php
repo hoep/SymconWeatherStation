@@ -109,12 +109,21 @@ final class WeatherEngine
             $text .= sprintf(' | Kamera: Sicht %d %%, bei tiefer Sonne nicht beurteilbar — nicht gewertet',
                              (int) $sicht);
         } elseif ($sicht !== null) {
-            if ($sicht <= $c['sightFog'] && $moeglich) {
-                $stufe = max($stufe, self::NEBEL_DICHT);
-                $text .= sprintf(' | Kamera: Sicht %d %% des Klarwerts — gemessen dicht', (int) $sicht);
-            } elseif ($sicht <= $c['sightWarn'] && $moeglich) {
-                $stufe = max($stufe, self::NEBEL_NEBEL);
-                $text .= sprintf(' | Kamera: Sicht %d %% — eingeschränkt', (int) $sicht);
+            // DIE MESSUNG GILT, NICHT DIE SCHAETZUNG.
+            //
+            // Frueher durfte die Kamera die gerechnete Stufe nur ANHEBEN (max()) oder bei
+            // freier Sicht ganz verwerfen. Sie konnte sie aber nicht auf das herunterziehen,
+            // was sie tatsaechlich sieht - und damit widersprach der Code seiner eigenen
+            // Praemisse. Ergebnis am 26.08.2026 um 07:58: Kamera misst 53 % Sicht, also
+            // "eingeschraenkt", der FSI schaetzt 17 und damit "dicht" - angezeigt wurde
+            // "dichter Nebel", waehrend draussen leichter Dunst lag.
+            //
+            // Jetzt setzt die Kamera die Stufe, sobald Nebel physikalisch moeglich ist.
+            // Ist er ausgeschlossen, darf sie weiterhin nur herabstufen (Zweige unten).
+            if ($moeglich && ($sicht <= $c['sightFog'] || $sicht <= $c['sightWarn'])) {
+                $stufe = ($sicht <= $c['sightFog']) ? self::NEBEL_DICHT : self::NEBEL_NEBEL;
+                $text .= sprintf(' | Kamera: Sicht %d %% des Klarwerts — %s (Messung schlägt Rechnung)',
+                                 (int) $sicht, ($sicht <= $c['sightFog']) ? 'gemessen dicht' : 'eingeschränkt');
             } elseif ($sicht <= $c['sightWarn']) {
                 $text .= sprintf(' | Kamera: Sicht %d %%, aber Nebel ist hier ausgeschlossen — nicht gewertet',
                                  (int) $sicht);
