@@ -36,6 +36,8 @@ class WeatherStation extends IPSModule
     private const CAM_SUN_MIN = 5.0;
     /** Ab dieser Sonnenhoehe abwaerts ist es richtig Nacht: IR leuchtet, der Nacht-Klarwert gilt. */
     private const CAM_NIGHT_MAX = -6.0;
+    /** So viele Sichtmessungen fliessen in den Median ein. */
+    private const SIGHT_RING = 5;
 
     /**
      * Mindestdauer (Sekunden), die eine geaenderte Nebelstufe anhalten muss, bevor sie
@@ -353,7 +355,12 @@ class WeatherStation extends IPSModule
                 'stormFarKm' => $this->ReadPropertyInteger('StormFarKm'),
                 'stormFarMin' => $this->ReadPropertyInteger('StormFarMin')];
 
-        $neb = WE::nebel($o, $this->hoehenwerte($lat, $lon), $kamera['sicht'], $cfg);
+        $sichtGlatt = $this->sichtGeglaettet($kamera['sicht']);
+        $neb = WE::nebel($o, $this->hoehenwerte($lat, $lon), $sichtGlatt, $cfg);
+        if ($kamera['sicht'] !== null && $sichtGlatt !== null && (int) $sichtGlatt !== (int) $kamera['sicht']) {
+            $neb['text'] .= sprintf(' | geglättet: Median %d %% aus den letzten Messungen (roh %d %%)',
+                                    (int) $sichtGlatt, (int) $kamera['sicht']);
+        }
         $gew = WE::gewitter($o, $this->ringMitQuellen(), $cfg);
         $this->WriteAttributeString('StrikeRing', json_encode($gew['ring']));
         $wol = WE::bewoelkung($o, $lat, $lon);
@@ -519,8 +526,18 @@ class WeatherStation extends IPSModule
         $this->SetValue('StormText', $gew['text']);
         $this->put('CloudPct', $wol['pct']);
         $this->SetValue('CloudSrc', $wol['quelle']);
+        // Dunst bekommt seine Tageszeit: vormittags loest sich Strahlungsnebel auf,
+        // abends bildet er sich. Dieselbe Stufe, aber die genauere Aussage - wer sie liest,
+        // weiss, ob es besser oder schlechter wird.
+        //
+        // Bewusst nach der UHR und nicht nach dem Sonnenstand: im Winter steht die Sonne den
+        // ganzen Tag tief, "Morgendunst" um 14 Uhr waere Unsinn. Mittags heisst Dunst
+        // schlicht diesig - dann ist er weder im Entstehen noch im Vergehen.
+        $std = (int) date('H');
+        $tageszeit = ($std < 11) ? 'morgen' : (($std >= 16) ? 'abend' : null);
         $this->SetValue('Condition', WE::wetterlage($gew['stufe'], $ns, $neb['stufe'],
-                                                    $wol['pct'] ?? $this->GetValue('CloudPct')));
+                                                    $wol['pct'] ?? $this->GetValue('CloudPct'),
+                                                    $tageszeit));
 
         $this->put('SightPct', $kamera['sicht']);
         if ($kamera['schnee'] !== null) {
@@ -1061,6 +1078,45 @@ class WeatherStation extends IPSModule
             $teile[] = $l['name'] . ' ' . $l['text'] . ($l['veraltet'] ? ' (veraltet!)' : '');
         }
         return ['stufe' => $max, 'liste' => $liste, 'text' => implode(' | ', $teile)];
+    }
+
+    /**
+     * Sicht glaetten, bevor daraus eine Stufe wird.
+     *
+     * Die Kamerasicht schwankt naturgemaess: Belichtungsautomatik, ziehende Wolken, ein
+     * Fahrzeug im Bild. Am 26.08.2026 pendelte sie zwischen 43 und 55 % - also genau um die
+     * Schwelle "eingeschraenkt ab 45 %". Die Folge war schlimmer als Flattern: die
+     * Entprellung verlangt 300 s Ruhe, bekam sie nie, und die Anzeige blieb auf der ALTEN,
+     * hoeheren Stufe stehen. Ein Wert, der um eine Schwelle pendelt, wurde damit nie
+     * bestaetigt.
+     *
+     * Median statt Mittelwert: ein einzelner Ausreisser (Auto im Bild, Sonne in der Linse)
+     * verschiebt ihn nicht. Gespeichert wird im Puffer, nicht in einem Attribut - ein
+     * RegisterAttributeString legt fuer BESTEHENDE Instanzen nichts nach.
+     *
+     * Nur ECHTE Aenderungen wandern in den Ring: die Bildauswertung hat ihren eigenen Takt
+     * und liefert dazwischen den letzten Wert erneut; ohne diese Bedingung waere der Ring
+     * binnen Sekunden mit demselben Wert gefuellt und die Glaettung wirkungslos.
+     */
+    private function sichtGeglaettet(?float $roh): ?float
+    {
+        if ($roh === null) {
+            return null;
+        }
+        $ring = json_decode((string) $this->GetBuffer('SightRing'), true);
+        if (!is_array($ring)) {
+            $ring = [];
+        }
+        if (!$ring || (float) end($ring) !== (float) $roh) {
+            $ring[] = (float) $roh;
+        }
+        $ring = array_slice($ring, -self::SIGHT_RING);
+        $this->SetBuffer('SightRing', json_encode($ring));
+        $sortiert = $ring;
+        sort($sortiert);
+        $n = count($sortiert);
+        return ($n % 2) ? $sortiert[intdiv($n, 2)]
+                        : ($sortiert[$n / 2 - 1] + $sortiert[$n / 2]) / 2.0;
     }
 
     private function kameras(bool $nacht): array

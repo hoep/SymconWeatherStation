@@ -434,7 +434,13 @@ final class WeatherEngine
      * Datenherkunft: was jemand beim Blick aus dem Fenster zuerst benennen wuerde, steht vorn.
      * Ein Gewitter ist wichtiger als der Bedeckungsgrad, auch wenn die Wolken laenger da sind.
      */
-    public static function wetterlage(int $gewitter, array $ns, int $nebel, ?float $wolkenPct): string
+    /**
+     * @param string|null $tageszeit 'morgen'|'abend' bei tiefem Sonnenstand, sonst null.
+     *        Aus "diesig" wird damit Morgen- oder Abenddunst - dieselbe Stufe, aber die
+     *        genauere Aussage: morgens loest sich Strahlungsnebel auf, abends bildet er
+     *        sich. Wer das liest, weiss, ob es besser oder schlechter wird.
+     */
+    public static function wetterlage(int $gewitter, array $ns, int $nebel, ?float $wolkenPct, ?string $tageszeit = null): string
     {
         if ($gewitter >= self::GEW_GEWITTER) {
             return ($gewitter === self::GEW_NAH ? 'Gewitter in der Nähe' : 'Gewitter')
@@ -449,13 +455,17 @@ final class WeatherEngine
         if ($nebel >= self::NEBEL_NEBEL) {
             return $nebel === self::NEBEL_DICHT ? 'dichter Nebel' : 'Nebel';
         }
+        $dunst = ($tageszeit === 'morgen') ? 'Morgendunst'
+               : (($tageszeit === 'abend') ? 'Abenddunst' : 'diesig');
         if ($wolkenPct === null) {
-            return $nebel === self::NEBEL_DIESIG ? 'diesig' : 'keine Bewölkungsaussage';
+            return $nebel === self::NEBEL_DIESIG ? $dunst : 'keine Bewölkungsaussage';
         }
         $b = $wolkenPct / 100.0;
         $txt = ($b < 0.125) ? 'klar' : (($b < 0.375) ? 'heiter'
              : (($b < 0.625) ? 'wolkig' : (($b < 0.875) ? 'stark bewölkt' : 'bedeckt')));
-        if ($nebel === self::NEBEL_DIESIG) { $txt .= ', diesig'; }
+        // "diesig" ist ein Adjektiv und bleibt klein, "Morgendunst"/"Abenddunst" sind
+        // Substantive und behalten ihren grossen Anfangsbuchstaben.
+        if ($nebel === self::NEBEL_DIESIG) { $txt .= ', ' . $dunst; }
         if ($gewitter === self::GEW_LEUCHTEN) { $txt .= ', Wetterleuchten'; }
         return $txt;
     }
