@@ -67,7 +67,7 @@ class WeatherStation extends IPSModule
                             'StormRate', 'StormTrend', 'StormSpeed', 'StormEta', 'StormApproaching',
                             'SightPct', 'SnowCover', 'Condition',
                             'AppTemp', 'AbsHum', 'TempDamped', 'TempMin', 'TempMax', 'RainTotal',
-                            'WindMin', 'WindMax', 'Sunshine', 'SunshineToday', 'RainDetected'];
+                            'WindMin', 'WindMax', 'HumMin', 'HumMax', 'Sunshine', 'SunshineToday', 'RainDetected'];
 
     public function Create()
     {
@@ -169,6 +169,10 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableFloat('WindMax', 'Wind Maximum heute', $this->prof('~WindSpeed.kmh'), 85);
         $this->RegisterVariableInteger('WindMinTime', 'Zeit Wind Minimum', '~UnixTimestamp', 86);
         $this->RegisterVariableInteger('WindMaxTime', 'Zeit Wind Maximum', '~UnixTimestamp', 87);
+        $this->RegisterVariableFloat('HumMin', 'Luftfeuchte Minimum heute', $this->prof('~Humidity.F'), 88);
+        $this->RegisterVariableFloat('HumMax', 'Luftfeuchte Maximum heute', $this->prof('~Humidity.F'), 89);
+        $this->RegisterVariableInteger('HumMinTime', 'Zeit Feuchte Minimum', '~UnixTimestamp', 90);
+        $this->RegisterVariableInteger('HumMaxTime', 'Zeit Feuchte Maximum', '~UnixTimestamp', 91);
 
         // --- Abgeleitet ---
         $this->RegisterVariableFloat('WetBulb', 'Feuchtkugel', '~Temperature', 30);
@@ -1498,7 +1502,8 @@ class WeatherStation extends IPSModule
         }
         $von = strtotime('today 00:00');
         foreach ([['Temp', 'TempMin', 'TempMax', 'TempMinTime', 'TempMaxTime'],
-                  ['Wind', 'WindMin', 'WindMax', 'WindMinTime', 'WindMaxTime']] as $satz) {
+                  ['Wind', 'WindMin', 'WindMax', 'WindMinTime', 'WindMaxTime'],
+                  ['Hum',  'HumMin',  'HumMax',  'HumMinTime',  'HumMaxTime']] as $satz) {
             [$quelle, $iMin, $iMax, $iMinT, $iMaxT] = $satz;
             $vid = @$this->GetIDForIdent($quelle);
             if (!$vid || !AC_GetLoggingStatus($aid, $vid)) {
