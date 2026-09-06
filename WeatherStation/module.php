@@ -333,7 +333,28 @@ class WeatherStation extends IPSModule
         $nacht  = $hoehe < -0.833;
         $kamera = $this->kameras($nacht);
 
+        // WIE LANGE IST DER LETZTE NIEDERSCHLAG HER?
+        //
+        // Dafuer braucht es KEINE neue Variable: die Niederschlagsart wechselt beim Aufhoeren
+        // auf 0, und VariableChanged haelt genau diesen Zeitpunkt fest - SetValue mit
+        // unveraendertem Wert ruehrt ihn nicht an. (Eine neue Variable waere hier ohnehin
+        // laestig: sie entstuende erst beim naechsten Modul-Reload.)
+        // Faellt gerade Niederschlag, ist die Antwort 0 - dann greift ohnehin schon der
+        // Torwaechter im Regelsatz und Nebel ist ausgeschlossen.
+        $regenVorS = null;
+        $nsVid = @$this->GetIDForIdent('PrecipType');
+        if ($nsVid) {
+            $vv = @IPS_GetVariable($nsVid);
+            if (is_array($vv)) {
+                // Bewusst der Variablenwert und nicht $ns - das wird erst weiter unten
+                // gerechnet. Der Wert des VORIGEN Laufs genuegt hier vollauf: es geht um ein
+                // 90-Minuten-Fenster, nicht um Sekunden.
+                $regenVorS = ((int) @GetValue($nsVid) !== WE::NS_KEIN)
+                    ? 0 : max(0, time() - (int) ($vv['VariableChanged'] ?? 0));
+            }
+        }
         $cfg = ['fogHum' => $this->ReadPropertyFloat('FogHum'),
+                'rainAgoS' => $regenVorS,
                 'fogWind' => $this->ReadPropertyFloat('FogWind'),
                 'fogSpread' => $this->ReadPropertyFloat('FogSpread'),
                 'sightWarn' => $this->ReadPropertyInteger('SightWarn'),
@@ -535,10 +556,14 @@ class WeatherStation extends IPSModule
         // weiss, ob es besser oder schlechter wird.
         //
         // Bewusst nach der UHR und nicht nach dem Sonnenstand: im Winter steht die Sonne den
-        // ganzen Tag tief, "Morgendunst" um 14 Uhr waere Unsinn. Mittags heisst Dunst
-        // schlicht diesig - dann ist er weder im Entstehen noch im Vergehen.
+        // ganzen Tag tief, "Morgendunst" um 14 Uhr waere Unsinn. Tagsueber heisst es schlicht
+        // Dunst - dann ist er weder im Entstehen noch im Vergehen.
+        //
+        // Grenze 10 Uhr, frueher 11: Strahlungsnebel loest sich im Lauf des Vormittags auf,
+        // und um halb elf ist "Morgendunst" keine Aussage ueber ein Vergehen mehr, sondern
+        // nur noch eine Uhrzeitbehauptung.
         $std = (int) date('H');
-        $tageszeit = ($std < 11) ? 'morgen' : (($std >= 16) ? 'abend' : null);
+        $tageszeit = ($std < 10) ? 'morgen' : (($std >= 16) ? 'abend' : null);
         $this->SetValue('Condition', WE::wetterlage($gew['stufe'], $ns, $neb['stufe'],
                                                     $wol['pct'] ?? $this->GetValue('CloudPct'),
                                                     $tageszeit));

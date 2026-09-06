@@ -17,6 +17,9 @@ use Hoep\Weather\Observation;
 final class WeatherEngine
 {
     public const NEBEL_KEIN = 0, NEBEL_DIESIG = 1, NEBEL_NEBEL = 2, NEBEL_DICHT = 3;
+    /** So lange nach dem letzten Niederschlag zaehlt eine mittlere Kamera-Sicht nicht
+     *  als Dunst (nasse Optik, ausgewaschene Luft, flaches Licht). 90 Minuten. */
+    public const CAM_NASS_S = 5400;
     public const GEW_KEIN = 0, GEW_LEUCHTEN = 1, GEW_GEWITTER = 2, GEW_NAH = 3;
     public const NS_KEIN = 0, NS_REGEN = 1, NS_SCHNEEREGEN = 2, NS_SCHNEE = 3;
 
@@ -153,9 +156,28 @@ final class WeatherEngine
                 // und "klar" ist dann eine Aussage ueber die WOLKEN, nicht ueber die Luft.
                 // Gemessen am 25.08.2026: 67 % bei stark bewoelktem, aber klar sichtigem Himmel.
                 $nachts = !empty($c['camNacht']);
+                // NACH REGEN GILT DASSELBE ARGUMENT WIE NACHTS.
+                //
+                // Frisch nach Niederschlag ist ein MASSVOLLER Sichtverlust eine Aussage ueber
+                // die OPTIK, nicht ueber die Luft: Tropfen auf Kuppel und Scheibe, ausgewaschene
+                // Luft und das flache Licht unter der abziehenden Bewoelkung senken den Kontrast,
+                // gegen den der Klarwert als Bestmarke gelernt wurde.
+                // Gemessen am 05.09.2026, 10:27, kurz nach 9,9 mm/h: 95 % Feuchte, 0,8 K Spread,
+                // windstill, 100 % Bewoelkung, vier Kameras mit 51-66 % Sicht - die Anlage meldete
+                // Dunst, draussen war es schlicht stark bewoelkt.
+                // Ein KLAR unterschrittener Wert bleibt unangetastet: die Zweige darueber setzen
+                // bei sightFog/sightWarn weiterhin Nebel bzw. dichten Nebel, und echter Nebel
+                // nach Regen wird dadurch nicht uebersehen. Nur die ZWISCHENLAGE faellt weg.
+                $nass = isset($c['rainAgoS']) && $c['rainAgoS'] !== null
+                     && (int) $c['rainAgoS'] < self::CAM_NASS_S;
                 if ($sicht > $klar) {
                     $stufe = self::NEBEL_KEIN;
                     $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — gemessen klar, gerechnete Stufe verworfen', (int) $sicht, $klar);
+                } elseif ($nass) {
+                    $stufe = self::NEBEL_KEIN;
+                    $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — Niederschlag vor %d min, '
+                                   . 'nasse Optik und flaches Licht; Zwischenlage nicht gewertet',
+                                   (int) $sicht, $klar, (int) round(((int) $c['rainAgoS']) / 60));
                 } elseif ($nachts) {
                     $stufe = self::NEBEL_KEIN;
                     $text .= sprintf(' | Kamera: Sicht %d %% (klar ab %.0f %%) — nachts nicht aussagekräftig, '
@@ -456,15 +478,16 @@ final class WeatherEngine
             return $nebel === self::NEBEL_DICHT ? 'dichter Nebel' : 'Nebel';
         }
         $dunst = ($tageszeit === 'morgen') ? 'Morgendunst'
-               : (($tageszeit === 'abend') ? 'Abenddunst' : 'diesig');
+               : (($tageszeit === 'abend') ? 'Abenddunst' : 'Dunst');
         if ($wolkenPct === null) {
             return $nebel === self::NEBEL_DIESIG ? $dunst : 'keine Bewölkungsaussage';
         }
         $b = $wolkenPct / 100.0;
         $txt = ($b < 0.125) ? 'klar' : (($b < 0.375) ? 'heiter'
              : (($b < 0.625) ? 'wolkig' : (($b < 0.875) ? 'stark bewölkt' : 'bedeckt')));
-        // "diesig" ist ein Adjektiv und bleibt klein, "Morgendunst"/"Abenddunst" sind
-        // Substantive und behalten ihren grossen Anfangsbuchstaben.
+        // Alle drei sind Substantive: "Dunst", "Morgendunst", "Abenddunst". Frueher stand
+        // hier das Adjektiv "diesig" - "bedeckt, diesig" mischte zwei Wortarten, und der
+        // Tagesfall las sich anders als Morgen und Abend.
         if ($nebel === self::NEBEL_DIESIG) { $txt .= ', ' . $dunst; }
         if ($gewitter === self::GEW_LEUCHTEN) { $txt .= ', Wetterleuchten'; }
         return $txt;
