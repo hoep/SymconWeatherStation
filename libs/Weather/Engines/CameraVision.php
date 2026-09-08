@@ -61,6 +61,7 @@ final class CameraVision
     private const HIM_MAX_WEISS  = 35.0;   // % ausgebrannter Pixel, ab da sagt der Ausschnitt nichts
     private const HIM_MIN_ANTEIL = 40.0;   // % verwertbarer Pixel, darunter zeigt das Feld keinen Himmel
     private const HIM_SPANNE     = 0.25;   // R/B ueber dem Klarwert = voll bedeckt
+    private const HIM_MAX_GRAU   = 80.0;   // % bitgleich grauer Pixel, darueber ist es ein Infrarotbild
     private const HIM_MIN_LERN   = 40;     // bestaetigte Messungen, bevor geurteilt wird
     private const HIM_ALTER      = 45;     // Tage, nach denen ein Klarwert verworfen wird
 
@@ -333,7 +334,7 @@ final class CameraVision
         // hell genug ist, um Himmel zu sein, und nicht so hell, dass der Sensor ausgebrannt
         // ist. Wieviel des Ausschnitts das war, geht als Anteil mit hinaus - liegt er zu
         // niedrig, zeigt das Feld eben keinen Himmel und das Urteil entfaellt.
-        $rb = []; $sumL = 0.0; $ges = 0; $weiss = 0;
+        $rb = []; $sumL = 0.0; $ges = 0; $weiss = 0; $grau = 0;
         for ($y = 0; $y < $h; $y++) {
             for ($x = 0; $x < $w; $x++) {
                 $c = imagecolorat($s, $x, $y);
@@ -341,6 +342,9 @@ final class CameraVision
                 $ges++;
                 $l = 0.299 * $r + 0.587 * $g + 0.114 * $b;
                 $sumL += $l;
+                if ($r === $g && $g === $b) {
+                    $grau++;
+                }
                 if (max($r, $g, $b) >= 254) {
                     $weiss++;
                     continue;
@@ -360,7 +364,8 @@ final class CameraVision
         return ['p10' => round($q(0.10), 4), 'median' => round($q(0.50), 4),
                 'hell' => round($sumL / max(1, $ges), 1),
                 'weiss' => round(100.0 * $weiss / max(1, $ges), 1),
-                'anteil' => round(100.0 * $n / max(1, $ges), 1), 'n' => $n];
+                'anteil' => round(100.0 * $n / max(1, $ges), 1),
+                'grau' => round(100.0 * $grau / max(1, $ges), 1), 'n' => $n];
     }
 
     /**
@@ -390,6 +395,19 @@ final class CameraVision
         }
         if ((float) ($m['anteil'] ?? 0.0) < self::HIM_MIN_ANTEIL) {
             return null;                    // ueberwiegend kein Himmel im Ausschnitt
+        }
+        // INFRAROTBILD. Bei Dunkelheit schaltet die Kamera auf Infrarot um und liefert ein
+        // einkanaliges Bild, dreifach ausgegeben: R, G und B sind dann BITGLEICH. Rot durch
+        // Blau ist damit ueberall exakt 1,00 - kein Messwert, sondern eine Bauart. Ohne
+        // diesen Wachposten haette die Anlage jede Nacht "bedeckt" gemeldet, weil 1,00 weit
+        // ueber jedem gelernten Klarwert liegt.
+        //
+        // Getrennt wird ueber den Anteil BITGLEICH grauer Pixel, nicht ueber die Saettigung:
+        // eine wirklich geschlossene Wolkendecke ist ebenfalls fast farblos, aber nie
+        // bitgleich - Rauschen und Farbunterabtastung des JPEG sorgen dafuer. Gemessen an der
+        // eigenen Anlage am 08.09.2026: Infrarot 96,8 bis 100,0 %, Farbbild 0,0 bis 18,7 %.
+        if ((float) ($m['grau'] ?? 0.0) > self::HIM_MAX_GRAU) {
+            return null;
         }
         // REIFEGRAD. Solange der Klarwert nur aus wenigen Bildern stammt, misst er nicht "so
         // sieht klarer Himmel aus", sondern "so sah dieses eine Bild aus" - das Urteil waere

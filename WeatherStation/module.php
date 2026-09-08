@@ -978,15 +978,19 @@ class WeatherStation extends IPSModule
         }
         $z .= "\nKAMERAS\n";
         foreach ($kam['liste'] as $c) {
-            $z .= isset($c['fehler'])
-                ? sprintf("  %-16s %s\n", $c['name'], $c['fehler'])
+            if (isset($c['fehler'])) {
+                $z .= sprintf("  %-16s %s\n", $c['name'], $c['fehler']);
+                continue;
+            }
+            $z .= $c['sicht'] === null
+                ? sprintf("  %-16s reine Himmelskamera, keine Sichtmessung\n", $c['name'])
                 : sprintf("  %-16s Dichte %7s von %7s  =  Sicht %3d %%   (Kontrast %s, Helligkeit %s, %s)\n",
                           $c['name'], $c['dichte'], $c['klarwert'], $c['sicht'],
-                          $c['kontrast'], $c['helligkeit'], $c['zeit'])
-                    . sprintf("  %-16s Himmel: %s\n", '',
-                          $c['wolken'] === null
-                              ? ('keine Aussage' . (($c['wolkenText'] ?? '') !== '' ? ' - ' . $c['wolkenText'] : ' - kein Himmelsfeld gezogen'))
-                              : sprintf('%d %% bewölkt   (%s)', $c['wolken'], $c['wolkenText']));
+                          $c['kontrast'], $c['helligkeit'], $c['zeit']);
+            $z .= sprintf("  %-16s Himmel: %s\n", '',
+                      $c['wolken'] === null
+                          ? ('keine Aussage' . (($c['wolkenText'] ?? '') !== '' ? ' - ' . $c['wolkenText'] : ' - kein Himmelsfeld gezogen'))
+                          : sprintf('%d %% bewölkt   (%s)', $c['wolken'], $c['wolkenText']));
         }
         return $z . sprintf("\nNebel      %d   %s\nGewitter   %d   %s\nBewölkung  %s   %s\n"
                           . "Nieders.   %s\nWetterlage %s\n",
@@ -1359,33 +1363,50 @@ class WeatherStation extends IPSModule
                 $liste[] = ['id' => $mid, 'name' => $name, 'fehler' => 'Medienobjekt gibt es nicht'];
                 continue;
             }
-            $bin = base64_decode((string) @IPS_GetMediaContent($mid));
-            $roi = $this->roi($c);
-            $m   = CameraVision::messen($bin, $roi);
-            if ($m === null) {
-                $liste[] = ['id' => $mid, 'name' => $name, 'fehler' => 'kein auswertbares Bild'];
+            // ZWEI GETRENNTE AUFGABEN, ZWEI GETRENNTE BLICKRICHTUNGEN.
+            //
+            // Nebel misst man am GELAENDE: Zaun, Hecke, Hauskante - dort faellt der Kontrast,
+            // wenn die Sicht schlechter wird. Bewoelkung misst man am HIMMEL. Kaum eine
+            // Kamera taugt fuer beides: von acht Kameras der Anlage sehen vier ueberhaupt
+            // keinen Himmel (sie blicken nach unten oder ins Laub), und die mit dem freiesten
+            // Himmelsblick zeigt zu wenig Struktur fuer eine Sichtmessung.
+            //
+            // Deshalb sagt jede Zeile getrennt, woran sie teilnimmt: das Haekchen "Sicht" an
+            // der Nebelmessung, ein gezogenes Himmelsfeld an der Bewoelkung. Eine Kamera darf
+            // beides, eines davon - oder als reine Himmelskamera dazukommen, ohne den
+            // Sicht-Median zu veraendern, der die Nebelstufe traegt.
+            $machtSicht  = !isset($c['UseSight']) || !empty($c['UseSight']);
+            $hroi        = $this->himmelRoi($c);
+            // Die Kamera ist ein TAGESLICHTVERFAHREN. Nachts sieht sie den Himmel gar nicht,
+            // sondern das Infrarotlicht der eigenen Beleuchtung; dann traegt das Modell.
+            $machtHimmel = $hroi !== null && !$nacht;
+            if (!$machtSicht && !$machtHimmel) {
                 continue;
             }
-            $k = $mid . $slot;
-            $s = CameraVision::sicht($m['dichte'], (float) ($base[$k] ?? 0.0));
-            $base[$k] = $s['klarwert'];
-            $quoten[] = $s['sicht'];
+            $bin = base64_decode((string) @IPS_GetMediaContent($mid));
 
-            $sn = CameraVision::schneedecke($m, $nacht);
-            if ($sn !== null) {
-                $schnee = ($schnee === null) ? $sn : ($schnee || $sn);
+            $m = null; $s = null; $sn = null;
+            if ($machtSicht) {
+                $m = CameraVision::messen($bin, $this->roi($c));
+                if ($m === null) {
+                    $liste[] = ['id' => $mid, 'name' => $name, 'fehler' => 'kein auswertbares Bild'];
+                    continue;
+                }
+                $k = $mid . $slot;
+                $s = CameraVision::sicht($m['dichte'], (float) ($base[$k] ?? 0.0));
+                $base[$k] = $s['klarwert'];
+                $quoten[] = $s['sicht'];
+
+                $sn = CameraVision::schneedecke($m, $nacht);
+                if ($sn !== null) {
+                    $schnee = ($schnee === null) ? $sn : ($schnee || $sn);
+                }
             }
 
-            // HIMMEL: eigener Ausschnitt, eigener gelernter Klarwert.
-            //
-            // Getrennt vom Sichtfeld, und das ist kein Schoenheitsfehler, sondern notwendig:
-            // das Sichtfeld zeigt bewusst GELAENDE (Zaun, Hecke, Hauskante), weil dort der
-            // Kontrast haengt. Himmel im Sichtfeld verdirbt den Dunkelkanal, Gelaende im
-            // Himmelsfeld verdirbt das Farbverhaeltnis. Wer kein Himmelsfeld gezogen hat,
-            // liefert hier nichts - vier der acht Kameras sehen ueberhaupt keinen Himmel.
+            // Himmel im Sichtfeld verdirbt den Dunkelkanal, Gelaende im Himmelsfeld verdirbt
+            // das Farbverhaeltnis - deshalb zwei Ausschnitte und nicht einer.
             $hWert = null; $hText = '';
-            $hroi = $this->himmelRoi($c);
-            if ($hroi !== null) {
+            if ($machtHimmel) {
                 $hm = CameraVision::himmelMessen($bin, $hroi);
                 if ($hm !== null) {
                     $hk = $mid . $fach;
@@ -1395,6 +1416,7 @@ class WeatherStation extends IPSModule
                     // langen bedeckten Lage die Wolkendecke als Klarwert - und meldete danach
                     // nie wieder eine Wolke.
                     if ($hm['hell'] >= 45.0 && $hm['weiss'] <= 35.0 && $hm['anteil'] >= 40.0
+                        && $hm['grau'] <= 80.0
                         && $modell !== null && $modell <= self::LERN_KLAR_PCT) {
                         $himBase[$hk] = CameraVision::himmelKlarwert($stand, (float) $hm['median']);
                         $stand = $himBase[$hk];
@@ -1408,16 +1430,20 @@ class WeatherStation extends IPSModule
                     } else {
                         $hText = $hm['hell'] < 45.0 ? 'zu dunkel'
                                : ($hm['weiss'] > 35.0 ? sprintf('überbelichtet (%.0f %% ausgebrannt)', $hm['weiss'])
+                               : ($hm['grau'] > 80.0 ? sprintf('Infrarotbild (%.0f %% bitgleich grau)', $hm['grau'])
                                : ($hm['anteil'] < 40.0 ? sprintf('kein Himmel im Feld (nur %.0f %% verwertbar)', $hm['anteil'])
-                               : sprintf('Klarwert erst %d von %d Messungen', (int) ($stand['n'] ?? 0), 40)));
+                               : sprintf('Klarwert erst %d von %d Messungen', (int) ($stand['n'] ?? 0), 40))));
                     }
                 }
             }
 
-            $liste[] = ['id' => $mid, 'name' => $name, 'kontrast' => $m['kontrast'],
-                        'dichte' => $m['dichte'], 'klarwert' => $s['klarwert'],
-                        'sicht' => (int) round($s['sicht']),
-                        'helligkeit' => $m['helligkeit'], 'saettigung' => $m['saettigung'],
+            $liste[] = ['id' => $mid, 'name' => $name,
+                        'kontrast' => $m['kontrast'] ?? null,
+                        'dichte' => $m['dichte'] ?? null,
+                        'klarwert' => $s['klarwert'] ?? null,
+                        'sicht' => $s === null ? null : (int) round($s['sicht']),
+                        'helligkeit' => $m['helligkeit'] ?? null,
+                        'saettigung' => $m['saettigung'] ?? null,
                         'schnee' => $sn, 'zeit' => $nacht ? 'Nacht' : 'Tag',
                         'wolken' => $hWert === null ? null : (int) round($hWert),
                         'wolkenText' => $hText];
@@ -1950,6 +1976,8 @@ class WeatherStation extends IPSModule
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 1, 'maximum' => 99]],
                      ['caption' => 'gilt (s)', 'name' => 'MaxAge', 'width' => '90px', 'add' => 900,
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 30, 'maximum' => 86400]],
+                     ['caption' => 'Sicht', 'name' => 'UseSight', 'width' => '70px', 'add' => true,
+                      'edit' => ['type' => 'CheckBox']],
                      ['caption' => 'Himmel X %', 'name' => 'SX', 'width' => '90px', 'add' => 0,
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 0, 'maximum' => 95]],
                      ['caption' => 'Himmel Y %', 'name' => 'SY', 'width' => '90px', 'add' => 0,
@@ -1961,6 +1989,13 @@ class WeatherStation extends IPSModule
                      ['caption' => 'aktiv', 'name' => 'Enabled', 'width' => '70px', 'add' => true,
                       'edit' => ['type' => 'CheckBox']],
                  ]],
+                ['type' => 'Label', 'caption' =>
+                    'Nebel und Bewölkung sind ZWEI Messungen mit zwei Blickrichtungen. Nebel misst man am '
+                    . 'Gelände (Zaun, Hecke, Hauskante) — dort fällt der Kontrast. Bewölkung misst man am '
+                    . 'Himmel. Das Häkchen "Sicht" sagt, ob eine Kamera an der Nebelmessung teilnimmt, ein '
+                    . 'gezogenes Himmelsfeld sagt, ob sie an der Bewölkung teilnimmt. Eine Kamera darf '
+                    . 'beides, eines davon — oder als reine Himmelskamera dazukommen, ohne den Sicht-Median '
+                    . 'zu verändern, der die Nebelstufe trägt.'],
                 ['type' => 'Label', 'caption' =>
                     'Das HIMMELSFELD ist ein zweiter, getrennter Ausschnitt und misst die Bewölkung über '
                     . 'das Rot/Blau-Verhältnis: klarer Himmel ist blau (Rayleigh), Wolken sind grau bis '
