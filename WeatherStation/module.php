@@ -1294,14 +1294,26 @@ class WeatherStation extends IPSModule
         return $wert;
     }
 
-    /** Attribut als Feld lesen - vertraegt Instanzen, die es noch nicht haben. */
+    /**
+     * Attribut als Feld lesen - vertraegt Instanzen, die es noch nicht haben.
+     *
+     * Ein neu hinzugefuegtes RegisterAttributeString legt fuer BESTEHENDE Instanzen nichts
+     * nach: ReadAttributeString liefert dann FALSE und wirft dabei nicht. Genau daran brach
+     * am 08.09.2026 der erste Lauf nach dem Reload ab - json_decode(false) ist unter PHP 8
+     * ein TypeError, und der riss die ganze Auswertung mit. Deshalb wird hier auf den Typ
+     * geprueft und nicht nur auf eine Ausnahme gewartet.
+     */
     private function attrJson(string $name): array
     {
         try {
-            $v = json_decode($this->ReadAttributeString($name), true);
+            $roh = $this->ReadAttributeString($name);
         } catch (\Throwable $e) {
             return [];
         }
+        if (!is_string($roh) || $roh === '') {
+            return [];
+        }
+        $v = json_decode($roh, true);
         return is_array($v) ? $v : [];
     }
 
@@ -1342,10 +1354,7 @@ class WeatherStation extends IPSModule
         if (!is_array($base)) {
             $base = [];
         }
-        $himBase = json_decode($this->ReadAttributeString('SkyBase'), true);
-        if (!is_array($himBase)) {
-            $himBase = [];
-        }
+        $himBase = $this->attrJson('SkyBase');
         $slot = $nacht ? 'n' : 'd';
         $fach = CameraVision::himmelFach($hoehe);
 
@@ -1449,7 +1458,7 @@ class WeatherStation extends IPSModule
                         'wolkenText' => $hText];
         }
         $this->WriteAttributeString('CamBase', json_encode($base));
-        $this->WriteAttributeString('SkyBase', json_encode($himBase));
+        $this->attrJsonSchreiben('SkyBase', $himBase);
 
         // Sicht = MITTLERE Kamera (Median), nicht die schlechteste.
         //
