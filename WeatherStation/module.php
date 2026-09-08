@@ -648,6 +648,7 @@ class WeatherStation extends IPSModule
     {
         $cams = json_decode($this->ReadPropertyString('Cameras'), true);
         $base = json_decode($this->ReadAttributeString('CamBase'), true);
+        $himBase = $this->attrJson('SkyBase');
         $letzte = [];
         foreach ((json_decode((string) $this->GetValue('CamTable'), true) ?: []) as $z) {
             $letzte[(int) ($z['id'] ?? 0)] = $z;
@@ -673,21 +674,41 @@ class WeatherStation extends IPSModule
                 $g = @getimagesizefromstring(base64_decode((string) @IPS_GetMediaContent($mid)));
                 if ($g) { $groesse = $g[0] . 'x' . $g[1]; }
             }
+            // Gelernte Himmels-Klarwerte dieser Kamera, je Sonnenhoehenfach. Sie gehoeren
+            // ins Werkzeug, weil sie erklaeren, warum eine Kamera (noch) nichts sagt:
+            // ohne Reife gibt es kein Urteil, und die Reife steht nur hier.
+            $himKlar = [];
+            foreach ($himBase as $k => $v) {
+                if (str_starts_with((string) $k, (string) $mid) && is_array($v)) {
+                    $himKlar[substr((string) $k, strlen((string) $mid))] =
+                        ['rb' => (float) ($v['rb'] ?? 0), 'n' => (int) ($v['n'] ?? 0)];
+                }
+            }
             $out[] = [
                 'id' => $mid, 'name' => $name, 'aktiv' => !empty($c['Enabled']),
                 'x' => (float) ($c['X'] ?? 0), 'y' => (float) ($c['Y'] ?? 0),
                 'w' => (float) ($c['W'] ?? 100), 'h' => (float) ($c['H'] ?? 100),
+                // Das Himmelsfeld ist der ZWEITE Ausschnitt derselben Kamera. Breite oder
+                // Hoehe auf 0 heisst "diese Kamera sieht keinen Himmel" - der Normalfall
+                // fuer alles, was nach unten blickt.
+                'sicht' => !isset($c['UseSight']) || !empty($c['UseSight']),
+                'hx' => (float) ($c['SX'] ?? 0), 'hy' => (float) ($c['SY'] ?? 0),
+                'hw' => (float) ($c['SW'] ?? 0), 'hh' => (float) ($c['SH'] ?? 0),
+                'himKlar' => $himKlar,
                 'groesse' => $groesse,
                 'klarwertTag' => (float) ($base[$mid . 'd'] ?? 0),
                 'klarwertNacht' => (float) ($base[$mid . 'n'] ?? 0),
                 'letzte' => $letzte[$mid] ?? null,
             ];
         }
+        $hoehe = Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'), $this->ReadPropertyFloat('Lon'));
         return json_encode(['ok' => true, 'kameras' => $out,
                             'verfuegbar' => $this->bildquellen(array_column($out, 'id')),
                             'schwellen' => CameraVision::schwellen(),
-                            'sonne' => round(Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'),
-                                                                $this->ReadPropertyFloat('Lon')), 1)],
+                            'himmelSchwellen' => CameraVision::himmelSchwellen(),
+                            'fach' => CameraVision::himmelFach($hoehe),
+                            'modell' => $this->modellWolken(),
+                            'sonne' => round($hoehe, 1)],
                            JSON_UNESCAPED_UNICODE);
     }
 
@@ -837,14 +858,62 @@ class WeatherStation extends IPSModule
      * Angaben in Prozent wie in der Instanz, damit im Werkzeug und im Formular
      * dieselben Zahlen stehen.
      */
-    public function MessfeldPruefen(int $MediaID, float $X, float $Y, float $W, float $H): string
+    public function MessfeldPruefen(int $MediaID, float $X, float $Y, float $W, float $H,
+                                    string $Feld = 'sicht'): string
     {
+        if ($Feld === 'himmel') {
+            $m = $this->messeHimmel($MediaID, $X, $Y, $W, $H);
+            if ($m === null) {
+                return json_encode(['ok' => false, 'fehler' => 'kein auswertbares Bild']);
+            }
+            return json_encode(['ok' => true, 'feld' => 'himmel', 'messung' => $m,
+                                'himmelSchwellen' => CameraVision::himmelSchwellen()],
+                               JSON_UNESCAPED_UNICODE);
+        }
         $m = $this->messeFeld($MediaID, $X, $Y, $W, $H);
         if ($m === null) {
             return json_encode(['ok' => false, 'fehler' => 'kein auswertbares Bild']);
         }
-        return json_encode(['ok' => true, 'messung' => $m,
+        return json_encode(['ok' => true, 'feld' => 'sicht', 'messung' => $m,
                             'schwellen' => CameraVision::schwellen()], JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Himmelsfeld messen - samt dem Urteil gegen den GELERNTEN Klarwert dieser Kamera.
+     *
+     * Das Urteil gehoert dazu, sonst zeigt das Werkzeug eine Zahl ohne Bezug: 0,84 heisst
+     * an der einen Kamera wolkenlos und an der naechsten halb bedeckt, je nach Weissabgleich
+     * und Blickrichtung. Steht noch kein reifer Klarwert, sagt das Werkzeug genau das - und
+     * nicht eine erfundene Bewoelkung.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function messeHimmel(int $mid, float $x, float $y, float $w, float $h): ?array
+    {
+        if ($mid <= 0 || !@IPS_MediaExists($mid)) {
+            return null;
+        }
+        if ($w < 5.0 || $h < 5.0) {
+            return null;
+        }
+        $m = CameraVision::himmelMessen(
+            base64_decode((string) @IPS_GetMediaContent($mid)),
+            ['x' => $x / 100, 'y' => $y / 100, 'w' => $w / 100, 'h' => $h / 100]);
+        if ($m === null) {
+            return null;
+        }
+        $hoehe = Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'), $this->ReadPropertyFloat('Lon'));
+        $fach  = CameraVision::himmelFach($hoehe);
+        $stand = $this->attrJson('SkyBase')[$mid . $fach] ?? null;
+        $u = CameraVision::himmelWolken($m, is_array($stand) ? $stand : null);
+        $m['flaeche'] = round(($w / 100) * ($h / 100), 3);
+        $m['fach']    = $fach;
+        $m['sonne']   = round($hoehe, 1);
+        $m['klar']    = is_array($stand) ? round((float) $stand['rb'], 3) : null;
+        $m['gelernt'] = is_array($stand) ? (int) ($stand['n'] ?? 0) : 0;
+        $m['wolken']  = $u === null ? null : round($u['wert'] * 100, 1);
+        $m['modell']  = $this->modellWolken();
+        return $m;
     }
 
     /**
@@ -854,8 +923,10 @@ class WeatherStation extends IPSModule
      * Feld. Wer ihn stehen liesse, vergliche die Kontrastdichte eines Zauns mit der
      * einer Wiese und bekaeme am naechsten klaren Morgen "Sicht eingeschraenkt".
      */
-    public function MessfeldSetzen(int $MediaID, float $X, float $Y, float $W, float $H): string
+    public function MessfeldSetzen(int $MediaID, float $X, float $Y, float $W, float $H,
+                                   string $Feld = 'sicht'): string
     {
+        $himmel = ($Feld === 'himmel');
         $cams = json_decode($this->ReadPropertyString('Cameras'), true);
         if (!is_array($cams)) {
             return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
@@ -865,25 +936,82 @@ class WeatherStation extends IPSModule
             if ((int) ($c['MediaID'] ?? 0) !== $MediaID) {
                 continue;
             }
-            $c['X'] = (int) round(max(0, min(95, $X)));
-            $c['Y'] = (int) round(max(0, min(95, $Y)));
-            $c['W'] = (int) round(max(5, min(100, $W)));
-            $c['H'] = (int) round(max(5, min(100, $H)));
+            if ($himmel) {
+                // Breite oder Hoehe unter 5 heisst ausdruecklich "kein Himmelsfeld": die
+                // Kamera nimmt dann an der Bewoelkung nicht teil. Das ist eine gueltige
+                // Einstellung und kein Fehler - vier der acht Kameras sehen keinen Himmel.
+                $aus = ($W < 5.0 || $H < 5.0);
+                $c['SX'] = $aus ? 0 : (int) round(max(0, min(95, $X)));
+                $c['SY'] = $aus ? 0 : (int) round(max(0, min(95, $Y)));
+                $c['SW'] = $aus ? 0 : (int) round(max(5, min(100, $W)));
+                $c['SH'] = $aus ? 0 : (int) round(max(5, min(100, $H)));
+            } else {
+                $c['X'] = (int) round(max(0, min(95, $X)));
+                $c['Y'] = (int) round(max(0, min(95, $Y)));
+                $c['W'] = (int) round(max(5, min(100, $W)));
+                $c['H'] = (int) round(max(5, min(100, $H)));
+            }
             $gefunden = true;
         }
         unset($c);
         if (!$gefunden) {
             return json_encode(['ok' => false, 'fehler' => 'Kamera steht nicht in der Liste']);
         }
-        $base = json_decode($this->ReadAttributeString('CamBase'), true);
-        if (is_array($base)) {
-            unset($base[$MediaID . 'd'], $base[$MediaID . 'n']);
-            $this->WriteAttributeString('CamBase', json_encode($base));
+        // Der gelernte Klarwert gehoert zum ALTEN Feld und faellt weg - bei beiden Feldern
+        // aus demselben Grund. Wer ihn stehen liesse, verglich die Kontrastdichte eines
+        // Zauns mit der einer Wiese, beziehungsweise die Himmelsfarbe mit der eines Dachs.
+        if ($himmel) {
+            $hb = $this->attrJson('SkyBase');
+            foreach (array_keys($hb) as $k) {
+                if (str_starts_with((string) $k, (string) $MediaID)) {
+                    unset($hb[$k]);
+                }
+            }
+            $this->attrJsonSchreiben('SkyBase', $hb);
+        } else {
+            $base = json_decode($this->ReadAttributeString('CamBase'), true);
+            if (is_array($base)) {
+                unset($base[$MediaID . 'd'], $base[$MediaID . 'n']);
+                $this->WriteAttributeString('CamBase', json_encode($base));
+            }
         }
         IPS_SetProperty($this->InstanceID, 'Cameras', json_encode(array_values($cams)));
         IPS_ApplyChanges($this->InstanceID);
-        return json_encode(['ok' => true, 'hinweis' => 'Feld gesetzt, Klarwert dieser Kamera verworfen'],
-                           JSON_UNESCAPED_UNICODE);
+        return json_encode(['ok' => true, 'hinweis' => $himmel
+            ? 'Himmelsfeld gesetzt, gelernte Klarwerte dieser Kamera verworfen'
+            : 'Sichtfeld gesetzt, Klarwert dieser Kamera verworfen'], JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Nimmt diese Kamera an der SICHTMESSUNG teil?
+     *
+     * Getrennt vom Aktiv-Schalter: "stillgelegt" heisst, die Kamera zaehlt nirgends mit,
+     * "keine Sicht" heisst, sie ist eine reine Himmelskamera. Genau das braucht man fuer
+     * Blickrichtungen, die viel Himmel und wenig feste Struktur zeigen - sie sollen die
+     * Bewoelkung tragen, ohne den Sicht-Median zu verschieben, an dem die Nebelstufe haengt.
+     */
+    public function KameraSicht(int $MediaID, bool $An): string
+    {
+        $cams = json_decode($this->ReadPropertyString('Cameras'), true);
+        if (!is_array($cams)) {
+            return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
+        }
+        $gefunden = false;
+        foreach ($cams as &$c) {
+            if ((int) ($c['MediaID'] ?? 0) === $MediaID) {
+                $c['UseSight'] = $An;
+                $gefunden = true;
+            }
+        }
+        unset($c);
+        if (!$gefunden) {
+            return json_encode(['ok' => false, 'fehler' => 'Kamera steht nicht in der Liste']);
+        }
+        IPS_SetProperty($this->InstanceID, 'Cameras', json_encode(array_values($cams)));
+        IPS_ApplyChanges($this->InstanceID);
+        return json_encode(['ok' => true, 'hinweis' => $An
+            ? 'zählt wieder bei der Sicht mit' : 'zählt nur noch bei der Bewölkung'],
+            JSON_UNESCAPED_UNICODE);
     }
 
     /**
@@ -898,8 +1026,11 @@ class WeatherStation extends IPSModule
      * Der Vorschlag taugt nur bei TAGESLICHT. Nachts ist der Dunkelkanal ueberall
      * niedrig, und das Ergebnis waere ein Feld, das tagsueber in den Himmel zeigt.
      */
-    public function MessfeldVorschlag(int $MediaID): string
+    public function MessfeldVorschlag(int $MediaID, string $Feld = 'sicht'): string
     {
+        if ($Feld === 'himmel') {
+            return $this->himmelVorschlag($MediaID);
+        }
         $sonne = Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'), $this->ReadPropertyFloat('Lon'));
         $kand = [];
         foreach ([0.0, 0.15, 0.3, 0.45] as $x) {
@@ -925,6 +1056,81 @@ class WeatherStation extends IPSModule
                             'sonne' => round($sonne, 1),
                             'vorschlaege' => array_slice($kand, 0, 5),
                             'geprueft' => count($kand)], JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Himmelsfelder vorschlagen.
+     *
+     * Bewertet wird, was ein Bewoelkungsfuehler koennen muss - und das ist fast das
+     * GEGENTEIL dessen, was einen Nebelfuehler ausmacht:
+     *   blau            niedriges Rot/Blau. Klarer Himmel liegt bei 0,70 bis 0,85, ein
+     *                   Dach, eine Wand oder eine Wiese bei 1,0 und darueber.
+     *   verwertbar      hoher Anteil an Pixeln, die hell genug fuer Himmel und nicht
+     *                   ausgebrannt sind. Ein Feld voller Aeste faellt hier durch.
+     *   nicht ausgebrannt   steht die Sonne im Ausschnitt, sagt er nichts.
+     *   grosszuegig     ein grosses Feld ist unempfindlicher gegen einen Ast im Wind.
+     *
+     * Der Vorschlag taugt nur bei TAGESLICHT und KLAREM Himmel. Nachts liefert die Kamera
+     * ein Infrarotbild, in dem Rot durch Blau ueberall exakt 1,00 ist; bei Bedeckung ist
+     * echter Himmel genauso grau wie ein Dach, und der Vorschlag zeigte auf das Dach.
+     * Beides wird gemeldet, statt still ein schlechtes Feld anzubieten.
+     */
+    private function himmelVorschlag(int $MediaID): string
+    {
+        $sonne = Meteo::sonnenhoehe($this->ReadPropertyFloat('Lat'), $this->ReadPropertyFloat('Lon'));
+        $modell = $this->modellWolken();
+        $kand = [];
+        // Das Raster ist bewusst grob: jeder Kandidat kostet eine vollstaendige
+        // Bilddecodierung, und ein 2688x1512-Bild braucht dafuer rund 30 ms. Ein feineres
+        // Raster mit 384 Kandidaten laege bei ueber zehn Sekunden - fuer einen Knopfdruck
+        // zu lang. Rund hundert Kandidaten sind die Groessenordnung, die der Vorschlag
+        // fuer das Sichtfeld seit jeher misst.
+        //
+        // Der Himmel steht OBEN: die y-Werte gehen nur bis knapp ueber ein Fuenftel, und
+        // die Hoehen bleiben flach. Ein Feld, das bis zur Bildmitte reicht, faengt sich
+        // Dach und Baumkronen ein und faellt am Anteil verwertbarer Pixel ohnehin durch.
+        foreach ([0.0, 0.2, 0.4, 0.6, 0.75] as $x) {
+            foreach ([0.0, 0.1, 0.2] as $y) {
+                foreach ([0.2, 0.35, 0.55] as $w) {
+                    foreach ([0.1, 0.18, 0.28] as $h) {
+                        if ($x + $w > 1.0001 || $y + $h > 1.0001) {
+                            continue;
+                        }
+                        $m = $this->messeHimmel($MediaID, $x * 100, $y * 100, $w * 100, $h * 100);
+                        if ($m === null) {
+                            continue;
+                        }
+                        $kand[] = ['x' => (int) round($x * 100), 'y' => (int) round($y * 100),
+                                   'w' => (int) round($w * 100), 'h' => (int) round($h * 100),
+                                   'note' => $this->himmelNote($m), 'messung' => $m];
+                    }
+                }
+            }
+        }
+        usort($kand, static fn(array $a, array $b): int => $b['note'] <=> $a['note']);
+        return json_encode(['ok' => true, 'feld' => 'himmel',
+                            'tageslicht' => $sonne >= 3.0,
+                            'klar' => $modell !== null && $modell <= self::LERN_KLAR_PCT,
+                            'modell' => $modell,
+                            'sonne' => round($sonne, 1),
+                            'vorschlaege' => array_slice($kand, 0, 5),
+                            'geprueft' => count($kand)], JSON_UNESCAPED_UNICODE);
+    }
+
+    /** Note eines Feldes als Bewoelkungsfuehler, 0..100. */
+    private function himmelNote(array $m): int
+    {
+        $t = CameraVision::himmelSchwellen();
+        // Infrarot oder ausgebrannt: das Feld sagt gar nichts, egal wie gut der Rest aussieht.
+        if ((float) $m['grau'] > $t['maxGrau'] || (float) $m['weiss'] > $t['maxWeiss']
+            || (float) $m['hell'] < $t['minHell']) {
+            return 0;
+        }
+        $blau    = max(0.0, min(1.0, (1.05 - (float) $m['median']) / 0.35));
+        $anteil  = max(0.0, min(1.0, (float) $m['anteil'] / 100.0));
+        $weiss   = max(0.0, min(1.0, 1.0 - (float) $m['weiss'] / max(1.0, $t['maxWeiss'])));
+        $flaeche = max(0.0, min(1.0, (float) ($m['flaeche'] ?? 0) / 0.15));
+        return (int) round(100 * (0.40 * $blau + 0.30 * $anteil + 0.18 * $weiss + 0.12 * $flaeche));
     }
 
     /** Note eines Feldes als Nebelfuehler, 0..100. */

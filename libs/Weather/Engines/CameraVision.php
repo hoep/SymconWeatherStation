@@ -86,6 +86,23 @@ final class CameraVision
                 'konKlar' => self::SIG_KON_KLAR, 'konNebel' => self::SIG_KON_NEBEL];
     }
 
+    /**
+     * Die Schwellen der Himmelsauswertung, nach aussen gegeben.
+     *
+     * Aus demselben Grund wie bei schwellen(): das Werkzeug zum Ziehen des Himmelsfeldes
+     * muss gegen DIESELBEN Zahlen urteilen wie die Messung. Zwei Quellen fuer eine
+     * Schwelle waeren zwei Wahrheiten, und die eine davon veraltet still.
+     *
+     * @return array{minPixel:float,minHell:float,maxWeiss:float,minAnteil:float,spanne:float,maxGrau:float,minLern:int}
+     */
+    public static function himmelSchwellen(): array
+    {
+        return ['minPixel' => self::HIM_MIN_PIXEL, 'minHell' => self::HIM_MIN_HELL,
+                'maxWeiss' => self::HIM_MAX_WEISS, 'minAnteil' => self::HIM_MIN_ANTEIL,
+                'spanne' => self::HIM_SPANNE, 'maxGrau' => self::HIM_MAX_GRAU,
+                'minLern' => self::HIM_MIN_LERN];
+    }
+
     public static function verfuegbar(): bool
     {
         return function_exists('imagecreatefromstring') && function_exists('imagecolorat');
