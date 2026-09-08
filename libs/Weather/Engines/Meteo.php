@@ -134,16 +134,35 @@ final class Meteo
      * Bewoelkungsgrad 0..1 aus gemessener und theoretischer Strahlung (Kasten & Czeplak 1980,
      * nach Bedeckungsgrad aufgeloest).
      *
-     * Gibt NULL zurueck, wenn die Sonne zu tief steht: unter etwa 5 Grad ist der Klarhimmel-
-     * wert so klein, dass jede Messungenauigkeit den Bedeckungsgrad zwischen 0 und 8 Achteln
-     * springen laesst. Eine ehrliche Nichtaussage ist besser als eine erfundene Zahl.
+     * DER KLARHIMMELWERT MUSS GELERNT SEIN, sonst ist das Ergebnis wertlos. Haurwitz ist eine
+     * weltweite Faustformel; sie kennt weder Seehoehe noch Horizont, Truebung oder ein
+     * gealtertes Sensorglas. Und die Umkehrung zieht die dritte Wurzel: schon anderthalb
+     * Prozent zu wenig Strahlung ergeben zweiunddreissig Prozent Bewoelkung. Gemessen am
+     * eigenen Bestand am 08.09.2026, einem Tag mit 0 % Modellbewoelkung bis 14 Uhr:
+     *
+     *   09:00  Sonne 24°  327 von 393 W/m2 nach Haurwitz  ->  62 % Bewoelkung
+     *   11:00  Sonne 40°  640 von 650                     ->  33 %
+     *   13:00  Sonne 47°  777 von 746                     ->   0 %
+     *
+     * Also meldete die Anlage an einem wolkenlosen Vormittag zwei Drittel Bewoelkung. Der
+     * Faktor korrigiert genau das: er ist das gelernte Verhaeltnis "gemessen zu Haurwitz" bei
+     * klarem Himmel, je Fach der Sonnenhoehe, und macht aus der Weltformel eine Kennlinie
+     * DIESES Standorts mit DIESEM Sensor.
+     *
+     * Gibt NULL zurueck, wenn die Sonne zu tief steht. Die Grenze liegt bei 10 Grad, frueher
+     * bei 5: bei 5 Grad Sonnenhoehe stand am selben Abend ein Klarhimmelwert von 57 W/m2
+     * gegen 23 gemessene - daraus wurden 93 % Bewoelkung bei sternklarem Himmel. So flach
+     * laeuft das Licht durch die zehnfache Luftmasse und streift jeden Baum am Horizont;
+     * eine ehrliche Nichtaussage ist besser als eine erfundene Zahl.
+     *
+     * @param float $faktor gelerntes Verhaeltnis gemessen/Haurwitz bei klarem Himmel (1.0 = ungelernt)
      */
-    public static function bewoelkung(float $gemessen, float $sonnenhoehe): ?float
+    public static function bewoelkung(float $gemessen, float $sonnenhoehe, float $faktor = 1.0): ?float
     {
-        if ($sonnenhoehe <= 5.0) {
+        if ($sonnenhoehe <= self::STRAHLUNG_MIN_HOEHE) {
             return null;
         }
-        $klar = self::klarhimmel($sonnenhoehe);
+        $klar = self::klarhimmel($sonnenhoehe) * max(0.55, min(1.35, $faktor));
         if ($klar <= 40.0) {
             return null;
         }
@@ -152,6 +171,27 @@ final class Meteo
             return 0.0;
         }
         return round(max(0.0, min(1.0, pow(max(0.0, (1.0 - $kt) / 0.75), 1.0 / 3.4))), 3);
+    }
+
+    /** Unter dieser Sonnenhoehe traegt die Globalstrahlung keine Bewoelkungsaussage mehr. */
+    public const STRAHLUNG_MIN_HOEHE = 10.0;
+
+    /**
+     * Fach der Sonnenhoehe fuer den gelernten Klarhimmel-Faktor.
+     *
+     * Getrennt gelernt, weil die Abweichung von Haurwitz mit dem Sonnenstand waechst: bei
+     * hohem Stand passt die Formel gut (13:00 kt = 1,04), bei flachem laeuft das Licht durch
+     * ein Vielfaches an Luft und die Formel ueberschaetzt (09:00 kt = 0,83). Ein gemeinsamer
+     * Faktor wuerde den Mittag verderben, um den Vormittag zu retten.
+     */
+    public static function strahlungFach(float $sonnenhoehe): string
+    {
+        foreach ([15.0, 22.0, 30.0, 40.0, 50.0] as $i => $g) {
+            if ($sonnenhoehe < $g) {
+                return 's' . $i;
+            }
+        }
+        return 's5';
     }
 
     /**

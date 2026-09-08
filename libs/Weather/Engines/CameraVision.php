@@ -52,6 +52,18 @@ final class CameraVision
     private const SIG_KON_KLAR  = 0.12;   // Kontrastdichte: klar
     private const SIG_KON_NEBEL = 0.03;   // Kontrastdichte: Nebel
 
+    // Himmel/Bewoelkung. Alle vier am eigenen Bestand gemessen (08.09.2026, wolkenloser Abend),
+    // nicht aus der Literatur uebernommen - Weissabgleich und Blickrichtung machen jede
+    // fremde Zahl hier wertlos.
+    private const HIM_MIN_BLAU   = 8;      // darunter traegt der Blaukanal kein Verhaeltnis
+    private const HIM_MIN_PIXEL  = 55.0;   // Helligkeit je Pixel: darunter ist es Laub, nicht Himmel
+    private const HIM_MIN_HELL   = 45.0;   // mittlere Helligkeit: darunter ist es Nacht
+    private const HIM_MAX_WEISS  = 35.0;   // % ausgebrannter Pixel, ab da sagt der Ausschnitt nichts
+    private const HIM_MIN_ANTEIL = 40.0;   // % verwertbarer Pixel, darunter zeigt das Feld keinen Himmel
+    private const HIM_SPANNE     = 0.25;   // R/B ueber dem Klarwert = voll bedeckt
+    private const HIM_MIN_LERN   = 40;     // bestaetigte Messungen, bevor geurteilt wird
+    private const HIM_ALTER      = 45;     // Tage, nach denen ein Klarwert verworfen wird
+
     private function __construct()
     {
     }
@@ -253,5 +265,202 @@ final class CameraVision
             return null;
         }
         return $mess['helligkeit'] > 170.0 && $mess['saettigung'] < 0.10;
+    }
+
+    // ==================================================================
+    // Himmel: Bewoelkung aus dem Rot/Blau-Verhaeltnis
+    // ==================================================================
+
+    /**
+     * MASSGEBLICH IST ROT DURCH BLAU, nicht die Helligkeit.
+     *
+     * Klarer Himmel ist blau, weil die Luft kurze Wellenlaengen streut (Rayleigh): Blau kommt
+     * vielfach gestreut aus allen Richtungen, Rot laeuft weitgehend durch. Eine Wolke besteht
+     * aus Troepfchen, die GROSS sind gegen die Wellenlaenge — die streuen alle Farben gleich
+     * (Mie). Deshalb ist eine Wolke grau bis weiss, und zwar unabhaengig davon, ob sie hell
+     * oder dunkel erscheint. Genau das ist der Punkt: die Helligkeit taeugt (eine Gewitterwand
+     * ist dunkler als klarer Himmel, eine Schleierwolke heller), das Farbverhaeltnis nicht.
+     *
+     * Das Verfahren ist der Stand der Technik bei Ganzhimmelskameras und heisst dort schlicht
+     * Rot/Blau-Verhaeltnis. Gemessen am eigenen Bestand am 08.09.2026 bei wolkenlosem Himmel:
+     * Himmel 0,71 bis 0,82 — weisse Hauswand 1,21, gelbe Hauswand 1,02, Wiese 1,13.
+     * Die Trennung ist deutlich, die absolute Lage aber NICHT allgemeingueltig.
+     *
+     * Deshalb wird KEINE feste Schwelle verwendet. Drei Dinge verschieben das Verhaeltnis,
+     * ohne dass eine Wolke im Bild waere:
+     *   - der Weissabgleich der Kamera (jedes Modell anders, manche regeln nach),
+     *   - die Sonnenhoehe (in der Daemmerung roetet sich der Himmel, R/B steigt gegen 1),
+     *   - die Blickrichtung (Richtung Sonne heller und weisser als vom Sonnenpunkt weg).
+     * Am selben Abend mass dieselbe Anlage 0,71 nach Sueden und 1,09 nach Westen in die
+     * Sonne — beide bei wolkenlosem Himmel. Eine feste Schwelle haette den Westblick
+     * vollstaendig als "bedeckt" gemeldet.
+     *
+     * Also wird der Klarwert GELERNT, wie schon bei der Sichtweite: je Kamera und je Fach der
+     * Sonnenhoehe die blaueste je gesehene Lage. Gegen sie wird gemessen.
+     *
+     * @param string $binaer Bilddaten
+     * @param array{x:float,y:float,w:float,h:float}|null $roi Himmelsausschnitt in Anteilen 0..1
+     * @return array{p10:float,median:float,hell:float,weiss:float,n:int}|null
+     */
+    public static function himmelMessen(string $binaer, ?array $roi = null): ?array
+    {
+        if ($binaer === '' || !self::verfuegbar()) {
+            return null;
+        }
+        $img = @imagecreatefromstring($binaer);
+        if (!$img) {
+            return null;
+        }
+        $W = imagesx($img);
+        $H = imagesy($img);
+        $sx = 0; $sy = 0; $sw = $W; $sh = $H;
+        if ($roi !== null) {
+            $sx = (int) round(max(0.0, min(0.95, (float) $roi['x'])) * $W);
+            $sy = (int) round(max(0.0, min(0.95, (float) $roi['y'])) * $H);
+            $sw = min((int) round(max(0.05, min(1.0, (float) $roi['w'])) * $W), $W - $sx);
+            $sh = min((int) round(max(0.05, min(1.0, (float) $roi['h'])) * $H), $H - $sy);
+        }
+        $w = min(self::BREITE, max(16, $sw));
+        $h = max(8, (int) round($sh * $w / max(1, $sw)));
+        $s = imagecreatetruecolor($w, $h);
+        imagecopyresampled($s, $img, 0, 0, $sx, $sy, $w, $h, $sw, $sh);
+        imagedestroy($img);
+
+        // NICHT JEDER PIXEL IM AUSSCHNITT IST HIMMEL. Ein Ast, ein Dachfirst, eine Baumkrone
+        // am Rand - alles dunkel, und dunkle Pixel haben ein voellig anderes Rot/Blau als
+        // Himmel. Beim ersten Versuch zog genau das den Kennwert der Sued-Kamera von 0,72 auf
+        // 0,57: gemessen wurde nicht der Himmel, sondern das Laub davor. Also zaehlt nur, was
+        // hell genug ist, um Himmel zu sein, und nicht so hell, dass der Sensor ausgebrannt
+        // ist. Wieviel des Ausschnitts das war, geht als Anteil mit hinaus - liegt er zu
+        // niedrig, zeigt das Feld eben keinen Himmel und das Urteil entfaellt.
+        $rb = []; $sumL = 0.0; $ges = 0; $weiss = 0;
+        for ($y = 0; $y < $h; $y++) {
+            for ($x = 0; $x < $w; $x++) {
+                $c = imagecolorat($s, $x, $y);
+                $r = ($c >> 16) & 255; $g = ($c >> 8) & 255; $b = $c & 255;
+                $ges++;
+                $l = 0.299 * $r + 0.587 * $g + 0.114 * $b;
+                $sumL += $l;
+                if (max($r, $g, $b) >= 254) {
+                    $weiss++;
+                    continue;
+                }
+                if ($l >= self::HIM_MIN_PIXEL && $b >= self::HIM_MIN_BLAU) {
+                    $rb[] = $r / $b;
+                }
+            }
+        }
+        imagedestroy($s);
+        if ($rb === []) {
+            return null;
+        }
+        sort($rb);
+        $n = count($rb);
+        $q = static fn (float $p): float => $rb[(int) max(0, min($n - 1, round($p * ($n - 1))))];
+        return ['p10' => round($q(0.10), 4), 'median' => round($q(0.50), 4),
+                'hell' => round($sumL / max(1, $ges), 1),
+                'weiss' => round(100.0 * $weiss / max(1, $ges), 1),
+                'anteil' => round(100.0 * $n / max(1, $ges), 1), 'n' => $n];
+    }
+
+    /**
+     * Bewoelkungsgrad 0..1 aus einer Himmelsmessung und dem gelernten Klarwert.
+     *
+     * Der gelernte Klarwert ist die BLAUESTE je gesehene Lage (kleinstes p10) dieser Kamera in
+     * diesem Fach der Sonnenhoehe — also "so sieht wolkenloser Himmel hier aus". Gemessen wird
+     * der Abstand nach oben: um HIM_SPANNE darueber gilt der Himmel als voll bedeckt. Der
+     * Wert 0,25 stammt aus dem eigenen Bestand (Himmel 0,75 bis 0,82, geschlossene weisse
+     * Flaeche ab etwa 1,0) und ist damit gemessen, nicht geraten.
+     *
+     * Rueckgabe NULL heisst ausdruecklich "nicht beurteilbar", nicht "wolkenlos". Drei Faelle:
+     *   - zu dunkel: nachts sieht die Kamera keinen Himmel, nur Schwarz oder Infrarotlicht,
+     *   - ausgebrannt: steht die Sonne im Bild, ist der Ausschnitt weiss und sagt nichts,
+     *   - noch nichts gelernt: ohne Klarwert gibt es keinen Bezug.
+     *
+     * @param array{p10:float,median:float,hell:float,weiss:float,n:int} $m
+     * @return array{wert:float,text:string}|null
+     */
+    public static function himmelWolken(array $m, ?array $klar): ?array
+    {
+        if ((float) ($m['hell'] ?? 0.0) < self::HIM_MIN_HELL) {
+            return null;
+        }
+        if ((float) ($m['weiss'] ?? 0.0) > self::HIM_MAX_WEISS) {
+            return null;
+        }
+        if ((float) ($m['anteil'] ?? 0.0) < self::HIM_MIN_ANTEIL) {
+            return null;                    // ueberwiegend kein Himmel im Ausschnitt
+        }
+        // REIFEGRAD. Solange der Klarwert nur aus wenigen Bildern stammt, misst er nicht "so
+        // sieht klarer Himmel aus", sondern "so sah dieses eine Bild aus" - das Urteil waere
+        // dann die Streuung INNERHALB des Ausschnitts und nichts weiter. Beim ersten Versuch
+        // meldete die Grundstueckskamera so 19,9 % bei wolkenlosem Himmel. Erst ab
+        // HIM_MIN_LERN bestaetigten Messungen wird geurteilt.
+        if ($klar === null || ($klar['rb'] ?? 0.0) <= 0.0
+            || (int) ($klar['n'] ?? 0) < self::HIM_MIN_LERN) {
+            return null;
+        }
+        $rb = (float) $klar['rb'];
+        $b  = max(0.0, min(1.0, ((float) $m['median'] - $rb) / self::HIM_SPANNE));
+        return ['wert' => round($b, 3),
+                'text' => sprintf('R/B %.2f gegen klar %.2f', (float) $m['median'], $rb)];
+    }
+
+    /**
+     * Klarwert nachfuehren — die blaueste Lage, die diese Kamera in diesem Fach je gesehen hat.
+     *
+     * ZWEI DINGE MACHEN DEN UNTERSCHIED zwischen brauchbar und wertlos:
+     *
+     * 1. GELERNT WIRD NUR, WENN EINE UNABHAENGIGE QUELLE KLAREN HIMMEL BELEGT. Sonst lernt
+     *    die Anlage waehrend einer langen bedeckten Lage die Wolkendecke als "so sieht klarer
+     *    Himmel aus" und meldet danach jeden echten Sonnentag als wolkenlos - bei gleichzeitig
+     *    stehendem Bezug also nie wieder eine Wolke. Der Beleg ist das Vorhersagemodell: es
+     *    ist zu grob, um die Bewoelkung zu MELDEN, aber genau gut genug, um zu sagen, ob
+     *    gerade gelernt werden darf.
+     * 2. VERGESSEN NACH ZEIT, nicht nach Zaehlern. Ein Klarwert aelter als HIM_ALTER Tage
+     *    beschreibt eine Kamera, die es so nicht mehr gibt - Weissabgleich nachgeregelt,
+     *    Linse verschmutzt, Ast gewachsen. Er wird verworfen und neu gelernt.
+     *
+     * GELERNT WIRD DER MEDIAN, nicht das untere Zehntel - und zwar deshalb, weil gegen den
+     * Median geurteilt wird. Der erste Entwurf lernte das untere Zehntel und verglich es mit
+     * dem Median desselben Bildes; die Differenz war dann nicht die Bewoelkung, sondern der
+     * HELLIGKEITSVERLAUF im Ausschnitt: Himmel ist zum Horizont hin heller und weisser als
+     * oben. Die Grundstueckskamera las so dauerhaft 19,9 % bei wolkenlosem Himmel. Bezug und
+     * Messgroesse muessen dieselbe Groesse sein, sonst misst man den Bildaufbau.
+     *
+     * @param array{rb:float,ts:int,n:int}|null $stand bisheriger Stand
+     * @return array{rb:float,ts:int,n:int}
+     */
+    public static function himmelKlarwert(?array $stand, float $median, ?int $jetzt = null): array
+    {
+        $jetzt = $jetzt ?? time();
+        if ($stand === null || ($stand['rb'] ?? 0.0) <= 0.0
+            || ($jetzt - (int) ($stand['ts'] ?? 0)) > self::HIM_ALTER * 86400) {
+            return ['rb' => round($median, 4), 'ts' => $jetzt, 'n' => 1];
+        }
+        $alt = (float) $stand['rb'];
+        $n   = (int) ($stand['n'] ?? 1) + 1;
+        if ($median < $alt) {
+            return ['rb' => round($median, 4), 'ts' => $jetzt, 'n' => $n];
+        }
+        return ['rb' => round($alt, 4), 'ts' => $jetzt, 'n' => $n];
+    }
+
+    /**
+     * Fach der Sonnenhoehe fuer den gelernten Klarwert.
+     *
+     * Getrennt gelernt, weil sich die Himmelsfarbe mit dem Sonnenstand aendert und nicht mit
+     * dem Wetter: mittags tiefblau, in der Daemmerung rot. Ein gemeinsamer Klarwert wuerde
+     * jeden Abend als bewoelkt melden — derselbe Fehler, der bei der Sichtweite schon einmal
+     * Tag und Nacht zusammengeworfen hat.
+     */
+    public static function himmelFach(float $sonnenhoehe): string
+    {
+        foreach ([2.0, 6.0, 12.0, 20.0, 30.0, 45.0] as $i => $g) {
+            if ($sonnenhoehe < $g) {
+                return 'h' . $i;
+            }
+        }
+        return 'h6';
     }
 }

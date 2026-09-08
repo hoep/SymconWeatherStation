@@ -387,25 +387,68 @@ final class WeatherEngine
     }
 
     /**
-     * Bewoelkung aus der gemessenen Strahlung. Nachts nicht bestimmbar — dann null, und die
-     * Anzeige haelt den letzten Tageswert, statt "wolkenlos" zu behaupten.
+     * Bewoelkung — aus DREI Quellen, in der Reihenfolge ihrer Zustaendigkeit.
      *
-     * @return array{pct:float|null,quelle:string}
+     * Keine einzelne Quelle traegt den ganzen Tag:
+     *
+     *   KAMERA (Rot/Blau)   sieht die Wolken wirklich, statt sie aus einer Wirkung zu
+     *                       erschliessen. Massgeblich, solange Tageslicht da ist. Blind bei
+     *                       Nacht und wertlos, wenn die Sonne im Ausschnitt steht.
+     *   STRAHLUNG           misst eine WIRKUNG der Wolken, nicht die Wolken. Brauchbar bei
+     *                       hohem Sonnenstand und gelerntem Klarhimmel, darunter nicht.
+     *   MODELL              immer verfuegbar, aber raeumlich und zeitlich grob — die richtige
+     *                       Rueckfallebene fuer Nacht und Daemmerung, nicht mehr.
+     *
+     * Genau daran scheiterte die Anlage am 08.09.2026: die Strahlung war die einzige Quelle,
+     * ihr Klarhimmel war geraten statt gelernt, und unterhalb der Aussagegrenze hielt die
+     * Anzeige den letzten Tageswert fest. Ergebnis war "stark bewoelkt" bei sternklarem
+     * Himmel. Deshalb wird hier NICHTS mehr festgehalten: sagt keine Quelle etwas, ist das
+     * Ergebnis null, und die Wetterlage sagt das auch.
+     *
+     * @param array{pct:float,anzahl:int,text:string}|null $kamera Kameraurteil, falls vorhanden
+     * @param float $strahlFaktor gelernter Klarhimmel-Faktor der Strahlungsmessung
+     * @param float|null $modell Bewoelkung des Vorhersagemodells in Prozent
+     * @return array{pct:float|null,quelle:string,weg:string}
      */
-    public static function bewoelkung(Observation $o, float $lat, float $lon, ?int $zeit = null): array
+    public static function bewoelkung(Observation $o, float $lat, float $lon, ?int $zeit = null,
+                                      ?array $kamera = null, float $strahlFaktor = 1.0,
+                                      ?float $modell = null): array
     {
+        $h   = Meteo::sonnenhoehe($lat, $lon, $zeit);
         $rad = $o->num('radiationWm2');
-        if ($rad === null) {
-            return ['pct' => null, 'quelle' => 'keine Strahlungsmessung'];
+
+        // Die Strahlung wird IMMER mitgerechnet, auch wenn die Kamera entscheidet: sie steht
+        // dann als Gegenprobe im Herkunftstext. Weichen zwei Messungen voneinander ab, will
+        // man das sehen und nicht raten muessen, welche gerade gegolten hat.
+        $strahl = ($rad === null) ? null : Meteo::bewoelkung($rad, $h, $strahlFaktor);
+
+        if ($kamera !== null && $kamera['anzahl'] > 0) {
+            $q = sprintf('%d Kamera%s: %s', $kamera['anzahl'],
+                         $kamera['anzahl'] === 1 ? '' : 's', $kamera['text']);
+            if ($strahl !== null) {
+                $q .= sprintf(' | Strahlung sagt %.0f %%', $strahl * 100);
+            }
+            return ['pct' => round($kamera['pct'], 1), 'quelle' => $q, 'weg' => 'kamera'];
         }
-        $h = Meteo::sonnenhoehe($lat, $lon, $zeit);
-        $n = Meteo::bewoelkung($rad, $h);
-        if ($n === null) {
-            return ['pct' => null, 'quelle' => sprintf('Sonne %.1f° — zu tief für eine Aussage', $h)];
+
+        if ($strahl !== null) {
+            return ['pct' => round($strahl * 100, 1), 'weg' => 'strahlung',
+                    'quelle' => sprintf('Strahlung %.0f von %.0f W/m² klar, Sonne %.1f°%s',
+                        $rad, Meteo::klarhimmel($h) * $strahlFaktor, $h,
+                        abs($strahlFaktor - 1.0) < 0.005 ? ' (Klarhimmel noch ungelernt)'
+                                                         : sprintf(' (Klarhimmel gelernt, ×%.2f)', $strahlFaktor))];
         }
-        return ['pct' => round($n * 100, 1),
-                'quelle' => sprintf('Strahlung %.0f von %.0f W/m² klar, Sonne %.1f°',
-                                    $rad, Meteo::klarhimmel($h), $h)];
+
+        if ($modell !== null) {
+            return ['pct' => round($modell, 1), 'weg' => 'modell',
+                    'quelle' => sprintf('Modell — %s', $h <= Meteo::STRAHLUNG_MIN_HOEHE
+                        ? sprintf('Sonne %.1f°, keine Kamera und keine Strahlungsaussage', $h)
+                        : 'weder Kamera noch Strahlung verwertbar')];
+        }
+
+        return ['pct' => null, 'weg' => 'keine',
+                'quelle' => $rad === null ? 'keine Strahlungsmessung'
+                                          : sprintf('Sonne %.1f° — keine Quelle kann etwas sagen', $h)];
     }
 
     /**

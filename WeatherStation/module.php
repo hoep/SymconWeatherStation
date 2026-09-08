@@ -39,6 +39,18 @@ class WeatherStation extends IPSModule
     /** So viele Sichtmessungen fliessen in den Median ein. */
     private const SIGHT_RING = 5;
 
+    /** Messungen im Glaettungsring der Bewoelkung. Fuenf Minuten - kuerzer als jede Wolkenlage. */
+    private const CLOUD_RING = 5;
+
+    // Lernen des Klarhimmel-Faktors. Grenzen aus dem eigenen Bestand: gemessen wurden
+    // Verhaeltnisse von 0,83 (Sonne 24°) bis 1,04 (Sonne 47°) an einem klaren Tag.
+    private const LERN_SCHRITT   = 0.03;   // hoechste Anhebung durch eine einzelne Messung
+    private const LERN_VERGESSEN = 0.005;  // Abbau je Tag ohne Bestaetigung
+    private const LERN_MIN       = 0.55;
+    private const LERN_MAX       = 1.35;
+    /** Bis zu dieser Modellbewoelkung gilt der Himmel als klar genug zum Lernen. */
+    private const LERN_KLAR_PCT  = 12.0;
+
     /**
      * Mindestdauer (Sekunden), die eine geaenderte Nebelstufe anhalten muss, bevor sie
      * veroeffentlicht wird. Ohne diese Sperre wechselte der Zustand am 19.08.2026
@@ -232,6 +244,8 @@ class WeatherStation extends IPSModule
         $this->RegisterVariableInteger('LastRun', 'Letzte Auswertung', '~UnixTimestamp', 72);
 
         $this->RegisterAttributeString('CamBase', '{}');
+        $this->RegisterAttributeString('SkyBase', '{}');    // gelernter Klarwert R/B je Kamera und Sonnenhoehenfach
+        $this->RegisterAttributeString('SunBase', '{}');    // gelernter Klarhimmel-Faktor der Strahlung
         $this->RegisterAttributeString('StrikeRing', '[]');
         $this->RegisterAttributeString('Upper', '{}');
         $this->RegisterAttributeString('Damp', '[]');
@@ -331,7 +345,7 @@ class WeatherStation extends IPSModule
 
         $hoehe  = Meteo::sonnenhoehe($lat, $lon);
         $nacht  = $hoehe < -0.833;
-        $kamera = $this->kameras($nacht);
+        $kamera = $this->kameras($nacht, $hoehe, $this->modellWolken());
 
         // WIE LANGE IST DER LETZTE NIEDERSCHLAG HER?
         //
@@ -388,7 +402,10 @@ class WeatherStation extends IPSModule
         }
         $gew = WE::gewitter($o, $this->ringMitQuellen(), $cfg);
         $this->WriteAttributeString('StrikeRing', json_encode($gew['ring']));
-        $wol = WE::bewoelkung($o, $lat, $lon);
+        $wol = WE::bewoelkung($o, $lat, $lon, null, $kamera['wolken'] ?? null,
+                              $this->strahlungFaktor($hoehe, $o->num('radiationWm2'), $this->modellWolken()),
+                              $this->modellWolken());
+        $wolGlatt = $this->wolkenGeglaettet($wol['pct']);
         $nass = $this->regenSensor();
         $ns  = WE::niederschlag($o, $nass);
 
@@ -549,8 +566,19 @@ class WeatherStation extends IPSModule
         // Die Warnung, auf die es ankommt: nicht "es blitzt", sondern "es kommt hierher".
         $this->SetValue('StormApproaching', $gew['trend'] < 0 && $gew['stufe'] >= WE::GEW_GEWITTER);
         $this->SetValue('StormText', $gew['text']);
-        $this->put('CloudPct', $wol['pct']);
-        $this->SetValue('CloudSrc', $wol['quelle']);
+        $this->put('CloudPct', $wolGlatt);
+        // Die Herkunft traegt den Weg mit: wer die Zahl liest, soll sehen, WORAUS sie stammt.
+        // Genau das fehlte, als die Anzeige "stark bewoelkt" meldete und daneben "Sonne zu
+        // tief fuer eine Aussage" stand - zwei Saetze, die einander widersprachen, weil der
+        // eine den festgehaltenen Tageswert beschrieb und der andere die aktuelle Lage.
+        $quelle = $wol['quelle'];
+        if ($wolGlatt !== null && $wol['pct'] !== null && (int) round($wolGlatt) !== (int) round($wol['pct'])) {
+            $quelle .= sprintf(' | geglättet %d %% (roh %d %%)', (int) round($wolGlatt), (int) round($wol['pct']));
+        }
+        if ($wol['pct'] === null) {
+            $quelle .= ' | angezeigt bleibt der letzte bekannte Wert';
+        }
+        $this->SetValue('CloudSrc', $quelle);
         // Dunst bekommt seine Tageszeit: vormittags loest sich Strahlungsnebel auf,
         // abends bildet er sich. Dieselbe Stufe, aber die genauere Aussage - wer sie liest,
         // weiss, ob es besser oder schlechter wird.
@@ -564,9 +592,14 @@ class WeatherStation extends IPSModule
         // nur noch eine Uhrzeitbehauptung.
         $std = (int) date('H');
         $tageszeit = ($std < 10) ? 'morgen' : (($std >= 16) ? 'abend' : null);
+        // AUSDRUECKLICH OHNE Rueckgriff auf den letzten Wert. Hier stand einmal
+        // "$wol['pct'] ?? $this->GetValue('CloudPct')" - und weil put() ein null ueberspringt,
+        // war der Ersatzwert der letzte TAGESWERT. Der ueberdauerte die ganze Nacht: am
+        // 08.09.2026 meldete die Station um 19 Uhr "stark bewoelkt" bei sternklarem Himmel,
+        // aus einer Messung von 84,7 %, die um 19:01 bei 5 Grad Sonnenhoehe entstanden war.
+        // Sagt keine Quelle etwas, sagt auch die Wetterlage nichts.
         $this->SetValue('Condition', WE::wetterlage($gew['stufe'], $ns, $neb['stufe'],
-                                                    $wol['pct'] ?? $this->GetValue('CloudPct'),
-                                                    $tageszeit));
+                                                    $wolGlatt, $tageszeit));
 
         $this->put('SightPct', $kamera['sicht']);
         if ($kamera['schnee'] !== null) {
@@ -928,10 +961,13 @@ class WeatherStation extends IPSModule
         $lat = $this->ReadPropertyFloat('Lat');
         $lon = $this->ReadPropertyFloat('Lon');
         $nacht = Meteo::sonnenhoehe($lat, $lon) < -0.833;
-        $kam = $this->kameras($nacht);
+        $kam = $this->kameras($nacht, Meteo::sonnenhoehe($lat, $lon), $this->modellWolken());
         $neb = WE::nebel($o, $this->hoehenwerte($lat, $lon), $kam['sicht']);
         $gew = WE::gewitter($o, $this->ring());
-        $wol = WE::bewoelkung($o, $lat, $lon);
+        $hoeheD = Meteo::sonnenhoehe($lat, $lon);
+        $wol = WE::bewoelkung($o, $lat, $lon, null, $kam['wolken'] ?? null,
+                              $this->strahlungFaktor($hoeheD, $o->num('radiationWm2'), $this->modellWolken()),
+                              $this->modellWolken());
         $ns  = WE::niederschlag($o);
 
         $z = sprintf("Dauer: %d ms\n\nZUSAMMENGEFÜHRT\n", (int) round((microtime(true) - $t0) * 1000));
@@ -946,13 +982,19 @@ class WeatherStation extends IPSModule
                 ? sprintf("  %-16s %s\n", $c['name'], $c['fehler'])
                 : sprintf("  %-16s Dichte %7s von %7s  =  Sicht %3d %%   (Kontrast %s, Helligkeit %s, %s)\n",
                           $c['name'], $c['dichte'], $c['klarwert'], $c['sicht'],
-                          $c['kontrast'], $c['helligkeit'], $c['zeit']);
+                          $c['kontrast'], $c['helligkeit'], $c['zeit'])
+                    . sprintf("  %-16s Himmel: %s\n", '',
+                          $c['wolken'] === null
+                              ? ('keine Aussage' . (($c['wolkenText'] ?? '') !== '' ? ' - ' . $c['wolkenText'] : ' - kein Himmelsfeld gezogen'))
+                              : sprintf('%d %% bewölkt   (%s)', $c['wolken'], $c['wolkenText']));
         }
         return $z . sprintf("\nNebel      %d   %s\nGewitter   %d   %s\nBewölkung  %s   %s\n"
                           . "Nieders.   %s\nWetterlage %s\n",
             $neb['stufe'], $neb['text'], $gew['stufe'], $gew['text'],
             $wol['pct'] === null ? '--' : $wol['pct'] . ' %', $wol['quelle'], $ns['text'],
-            WE::wetterlage($gew['stufe'], $ns, $neb['stufe'], $wol['pct']));
+            WE::wetterlage($gew['stufe'], $ns, $neb['stufe'], $wol['pct']))
+             . sprintf("Quelle     %s\nModell     %s\n", $wol['weg'],
+                 $this->modellWolken() === null ? '--' : $this->modellWolken() . ' %');
     }
 
     // ==================================================================
@@ -1148,10 +1190,131 @@ class WeatherStation extends IPSModule
                         : ($sortiert[$n / 2 - 1] + $sortiert[$n / 2]) / 2.0;
     }
 
-    private function kameras(bool $nacht): array
+    /**
+     * Bewoelkung glaetten — Median der letzten Messungen, wie bei der Sichtweite.
+     *
+     * Eine einzelne Wolke, die vor die Sonne zieht, ist Wetter; eine einzelne AUFNAHME davon
+     * ist Rauschen. Ohne Glaettung wechselt die Wetterlage im Minutentakt zwischen "klar" und
+     * "bedeckt", weil die Textstufen an festen Grenzen haengen (1/8, 3/8, 5/8, 7/8) und jeder
+     * Messwert einmal darueber und einmal darunter liegt.
+     *
+     * Fuenf Messungen, nicht mehr: eine echte Aufzugsbewoelkung haelt laenger als fuenf
+     * Minuten an und wird durchgelassen. Der Ring liegt im Puffer, nicht in einem Attribut -
+     * er soll einen Neustart NICHT ueberdauern, sonst glaettet die Anlage gegen Werte von
+     * vorgestern.
+     */
+    private function wolkenGeglaettet(?float $roh): ?float
+    {
+        if ($roh === null) {
+            return null;
+        }
+        $ring = json_decode((string) $this->GetBuffer('CloudRing'), true);
+        if (!is_array($ring)) {
+            $ring = [];
+        }
+        $ring[] = (float) $roh;
+        $ring = array_slice($ring, -self::CLOUD_RING);
+        $this->SetBuffer('CloudRing', json_encode($ring));
+        sort($ring);
+        $n = count($ring);
+        return ($n % 2) ? $ring[intdiv($n, 2)] : ($ring[$n / 2 - 1] + $ring[$n / 2]) / 2.0;
+    }
+
+    /**
+     * Bewoelkung des Vorhersagemodells fuer die LAUFENDE Stunde, in Prozent.
+     *
+     * Die Rueckfallebene fuer Nacht und Daemmerung. Grob - ein Modellpunkt steht fuer ein
+     * paar Kilometer und eine ganze Stunde - aber immer da, und das ist genau die Eigenschaft,
+     * die Kamera und Strahlung fehlt. Die Vorhersage wird ohnehin schon geholt und roh
+     * abgelegt; hier wird nur gelesen, kein zusaetzlicher Abruf.
+     */
+    private function modellWolken(): ?float
+    {
+        $j = json_decode((string) $this->GetValue('Forecast'), true);
+        if (!is_array($j) || !isset($j['hourly']['time'], $j['hourly']['cloud_cover'])) {
+            return null;
+        }
+        $i = array_search(date('Y-m-d\\TH:00'), $j['hourly']['time'], true);
+        if ($i === false || !isset($j['hourly']['cloud_cover'][$i])) {
+            return null;
+        }
+        $v = $j['hourly']['cloud_cover'][$i];
+        return $v === null ? null : max(0.0, min(100.0, (float) $v));
+    }
+
+    /**
+     * Gelernter Klarhimmel-Faktor der Strahlungsmessung, je Fach der Sonnenhoehe.
+     *
+     * Derselbe Gedanke wie beim Sicht-Klarwert der Kameras, nur in die andere Richtung: dort
+     * die BESTE je gesehene Kontrastdichte, hier das GROESSTE je gesehene Verhaeltnis von
+     * gemessener zu theoretischer Strahlung. Beides heisst "so sieht es hier aus, wenn nichts
+     * stoert", und beides muss gemessen werden, weil keine Formel den Standort kennt.
+     *
+     * Zwei Sicherungen:
+     *   - Ein einzelner Wert hebt den Faktor um hoechstens LERN_SCHRITT. Wolkenraender
+     *     buendeln Licht und lassen die Strahlung kurz UEBER den klaren Wert steigen (bis
+     *     +20 %); ohne die Schrittgrenze wuerde ein solcher Blitz den Bezug fuer Wochen
+     *     verderben. Ein wirklich klarer Tag liefert Dutzende Messungen je Fach und erreicht
+     *     die richtige Hoehe binnen einer halben Stunde.
+     *   - Langsames Vergessen. Ein verschmutztes oder gealtertes Sensorglas liefert dauerhaft
+     *     weniger; ohne Vergessen bliebe der Faktor auf dem Stand des Neuzustands stehen und
+     *     die Anlage meldete jeden klaren Tag als leicht bewoelkt.
+     */
+    private function strahlungFaktor(float $hoehe, ?float $rad, ?float $modell = null): float
+    {
+        if ($hoehe <= Meteo::STRAHLUNG_MIN_HOEHE) {
+            return 1.0;
+        }
+        $fach  = Meteo::strahlungFach($hoehe);
+        $stand = $this->attrJson('SunBase');
+        $e     = isset($stand[$fach]) && is_array($stand[$fach]) ? $stand[$fach] : null;
+        $wert  = $e === null ? 1.0 : (float) $e['f'];
+        $ts    = $e === null ? time() : (int) $e['ts'];
+
+        $tage = max(0.0, (time() - $ts) / 86400.0);
+        $wert = max(self::LERN_MIN, $wert - self::LERN_VERGESSEN * $tage);
+
+        // Auch hier gilt: gelernt wird nur, wenn eine unabhaengige Quelle klaren Himmel
+        // belegt. Der Hoechstwert allein taugte nicht - Wolkenraender buendeln Licht und
+        // treiben die Strahlung kurz UEBER den klaren Wert.
+        $klar = Meteo::klarhimmel($hoehe);
+        if ($rad !== null && $klar > 40.0 && $modell !== null && $modell <= self::LERN_KLAR_PCT) {
+            $r = $rad / $klar;
+            if ($r > $wert) {
+                $wert = min($r, $wert + self::LERN_SCHRITT);
+            }
+            $wert = max(self::LERN_MIN, min(self::LERN_MAX, $wert));
+            $stand[$fach] = ['f' => round($wert, 4), 'ts' => time()];
+            $this->attrJsonSchreiben('SunBase', $stand);
+        }
+        return $wert;
+    }
+
+    /** Attribut als Feld lesen - vertraegt Instanzen, die es noch nicht haben. */
+    private function attrJson(string $name): array
+    {
+        try {
+            $v = json_decode($this->ReadAttributeString($name), true);
+        } catch (\Throwable $e) {
+            return [];
+        }
+        return is_array($v) ? $v : [];
+    }
+
+    private function attrJsonSchreiben(string $name, array $wert): void
+    {
+        try {
+            $this->WriteAttributeString($name, json_encode($wert));
+        } catch (\Throwable $e) {
+            // Instanz kennt das Attribut noch nicht - dann wird eben nichts gelernt,
+            // statt den ganzen Lauf an einer Nebensache scheitern zu lassen.
+        }
+    }
+
+    private function kameras(bool $nacht, float $hoehe = 0.0, ?float $modell = null): array
     {
         if (!$this->ReadPropertyBoolean('UseCameras')) {
-            return ['liste' => [], 'sicht' => null, 'schnee' => null];
+            return ['liste' => [], 'sicht' => null, 'schnee' => null, 'wolken' => null];
         }
         // Bildauswertung ist der teuerste Teil des Laufs: Bild holen, entpacken, Kontrast je
         // Ausschnitt rechnen. Seit die Station auf jede Quell-Aktualisierung reagiert, liefe das
@@ -1165,19 +1328,24 @@ class WeatherStation extends IPSModule
         }
         $cams = json_decode($this->ReadPropertyString('Cameras'), true);
         if (!is_array($cams) || $cams === []) {
-            return ['liste' => [], 'sicht' => null, 'schnee' => null];
+            return ['liste' => [], 'sicht' => null, 'schnee' => null, 'wolken' => null];
         }
         if (!CameraVision::verfuegbar()) {
             return ['liste' => [['fehler' => 'Bildauswertung nicht möglich: PHP ohne GD']],
-                    'sicht' => null, 'schnee' => null];
+                    'sicht' => null, 'schnee' => null, 'wolken' => null];
         }
         $base = json_decode($this->ReadAttributeString('CamBase'), true);
         if (!is_array($base)) {
             $base = [];
         }
+        $himBase = json_decode($this->ReadAttributeString('SkyBase'), true);
+        if (!is_array($himBase)) {
+            $himBase = [];
+        }
         $slot = $nacht ? 'n' : 'd';
+        $fach = CameraVision::himmelFach($hoehe);
 
-        $liste = []; $quoten = []; $schnee = null;
+        $liste = []; $quoten = []; $schnee = null; $wolken = []; $wolkenText = [];
         foreach ($cams as $c) {
             $mid = (int) ($c['MediaID'] ?? 0);
             if ($mid <= 0 || empty($c['Enabled'])) {
@@ -1207,13 +1375,55 @@ class WeatherStation extends IPSModule
             if ($sn !== null) {
                 $schnee = ($schnee === null) ? $sn : ($schnee || $sn);
             }
+
+            // HIMMEL: eigener Ausschnitt, eigener gelernter Klarwert.
+            //
+            // Getrennt vom Sichtfeld, und das ist kein Schoenheitsfehler, sondern notwendig:
+            // das Sichtfeld zeigt bewusst GELAENDE (Zaun, Hecke, Hauskante), weil dort der
+            // Kontrast haengt. Himmel im Sichtfeld verdirbt den Dunkelkanal, Gelaende im
+            // Himmelsfeld verdirbt das Farbverhaeltnis. Wer kein Himmelsfeld gezogen hat,
+            // liefert hier nichts - vier der acht Kameras sehen ueberhaupt keinen Himmel.
+            $hWert = null; $hText = '';
+            $hroi = $this->himmelRoi($c);
+            if ($hroi !== null) {
+                $hm = CameraVision::himmelMessen($bin, $hroi);
+                if ($hm !== null) {
+                    $hk = $mid . $fach;
+                    $stand = isset($himBase[$hk]) && is_array($himBase[$hk]) ? $himBase[$hk] : null;
+                    // Gelernt wird nur, wenn das Bild etwas hergibt UND das Modell klaren
+                    // Himmel belegt. Ohne den zweiten Teil lernte die Anlage waehrend einer
+                    // langen bedeckten Lage die Wolkendecke als Klarwert - und meldete danach
+                    // nie wieder eine Wolke.
+                    if ($hm['hell'] >= 45.0 && $hm['weiss'] <= 35.0 && $hm['anteil'] >= 40.0
+                        && $modell !== null && $modell <= self::LERN_KLAR_PCT) {
+                        $himBase[$hk] = CameraVision::himmelKlarwert($stand, (float) $hm['median']);
+                        $stand = $himBase[$hk];
+                    }
+                    $w = CameraVision::himmelWolken($hm, $stand);
+                    if ($w !== null) {
+                        $hWert = $w['wert'] * 100.0;
+                        $hText = $w['text'];
+                        $wolken[] = $hWert;
+                        $wolkenText[] = sprintf('%s %d %% (%s)', $name, (int) round($hWert), $hText);
+                    } else {
+                        $hText = $hm['hell'] < 45.0 ? 'zu dunkel'
+                               : ($hm['weiss'] > 35.0 ? sprintf('überbelichtet (%.0f %% ausgebrannt)', $hm['weiss'])
+                               : ($hm['anteil'] < 40.0 ? sprintf('kein Himmel im Feld (nur %.0f %% verwertbar)', $hm['anteil'])
+                               : sprintf('Klarwert erst %d von %d Messungen', (int) ($stand['n'] ?? 0), 40)));
+                    }
+                }
+            }
+
             $liste[] = ['id' => $mid, 'name' => $name, 'kontrast' => $m['kontrast'],
                         'dichte' => $m['dichte'], 'klarwert' => $s['klarwert'],
                         'sicht' => (int) round($s['sicht']),
                         'helligkeit' => $m['helligkeit'], 'saettigung' => $m['saettigung'],
-                        'schnee' => $sn, 'zeit' => $nacht ? 'Nacht' : 'Tag'];
+                        'schnee' => $sn, 'zeit' => $nacht ? 'Nacht' : 'Tag',
+                        'wolken' => $hWert === null ? null : (int) round($hWert),
+                        'wolkenText' => $hText];
         }
         $this->WriteAttributeString('CamBase', json_encode($base));
+        $this->WriteAttributeString('SkyBase', json_encode($himBase));
 
         // Sicht = MITTLERE Kamera (Median), nicht die schlechteste.
         //
@@ -1231,9 +1441,22 @@ class WeatherStation extends IPSModule
             $sicht = ($n % 2) ? $quoten[intdiv($n, 2)]
                               : ($quoten[$n / 2 - 1] + $quoten[$n / 2]) / 2.0;
         }
+        // Bewoelkung: ebenfalls der MEDIAN, aus demselben Grund wie bei der Sicht. Eine
+        // einzelne Kamera kann eine Wolke voll im Bild haben, waehrend der Rest des Himmels
+        // frei ist - oder umgekehrt in eine Baumkrone schauen. Echte Bedeckung liegt ueber
+        // allen Blickrichtungen.
+        $wolke = null;
+        if ($wolken !== []) {
+            sort($wolken);
+            $nw = count($wolken);
+            $wolke = ['pct' => ($nw % 2) ? $wolken[intdiv($nw, 2)]
+                                         : ($wolken[$nw / 2 - 1] + $wolken[$nw / 2]) / 2.0,
+                      'anzahl' => $nw, 'text' => implode(', ', $wolkenText)];
+        }
+
         $res = ['liste' => $liste, 'sicht' => $sicht, 'schnee' => $schnee,
                 'sichtMin' => $quoten === [] ? null : min($quoten),
-                'sichtAnzahl' => count($quoten)];
+                'sichtAnzahl' => count($quoten), 'wolken' => $wolke];
         $this->WriteAttributeString('CamCache', json_encode(['ts' => time(), 'res' => $res],
                                                             JSON_UNESCAPED_UNICODE));
         return $res;
@@ -1248,6 +1471,19 @@ class WeatherStation extends IPSModule
             return null;
         }
         return ['x' => $x / 100, 'y' => $y / 100, 'w' => $w / 100, 'h' => $h / 100];
+    }
+
+    /**
+     * @return array{x:float,y:float,w:float,h:float}|null Himmelsausschnitt, null = keiner gezogen
+     */
+    private function himmelRoi(array $c): ?array
+    {
+        $w = (float) ($c['SW'] ?? 0); $h = (float) ($c['SH'] ?? 0);
+        if ($w < 5.0 || $h < 5.0) {
+            return null;                 // kein Himmelsfeld gezogen - diese Kamera sagt nichts
+        }
+        return ['x' => max(0.0, (float) ($c['SX'] ?? 0)) / 100, 'y' => max(0.0, (float) ($c['SY'] ?? 0)) / 100,
+                'w' => min(100.0, $w) / 100, 'h' => min(100.0, $h) / 100];
     }
 
     // ==================================================================
@@ -1714,9 +1950,26 @@ class WeatherStation extends IPSModule
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 1, 'maximum' => 99]],
                      ['caption' => 'gilt (s)', 'name' => 'MaxAge', 'width' => '90px', 'add' => 900,
                       'edit' => ['type' => 'NumberSpinner', 'minimum' => 30, 'maximum' => 86400]],
+                     ['caption' => 'Himmel X %', 'name' => 'SX', 'width' => '90px', 'add' => 0,
+                      'edit' => ['type' => 'NumberSpinner', 'minimum' => 0, 'maximum' => 95]],
+                     ['caption' => 'Himmel Y %', 'name' => 'SY', 'width' => '90px', 'add' => 0,
+                      'edit' => ['type' => 'NumberSpinner', 'minimum' => 0, 'maximum' => 95]],
+                     ['caption' => 'Himmel B %', 'name' => 'SW', 'width' => '90px', 'add' => 0,
+                      'edit' => ['type' => 'NumberSpinner', 'minimum' => 0, 'maximum' => 100]],
+                     ['caption' => 'Himmel H %', 'name' => 'SH', 'width' => '90px', 'add' => 0,
+                      'edit' => ['type' => 'NumberSpinner', 'minimum' => 0, 'maximum' => 100]],
                      ['caption' => 'aktiv', 'name' => 'Enabled', 'width' => '70px', 'add' => true,
                       'edit' => ['type' => 'CheckBox']],
                  ]],
+                ['type' => 'Label', 'caption' =>
+                    'Das HIMMELSFELD ist ein zweiter, getrennter Ausschnitt und misst die Bewölkung über '
+                    . 'das Rot/Blau-Verhältnis: klarer Himmel ist blau (Rayleigh), Wolken sind grau bis '
+                    . 'weiß (Mie) — unabhängig davon, ob sie hell oder dunkel wirken. Es muss reinen '
+                    . 'Himmel zeigen: kein Dach, kein Baum, keine Hauswand, und möglichst nicht in '
+                    . 'Richtung Sonne, sonst brennt der Ausschnitt aus. Breite oder Höhe auf 0 heißt '
+                    . '"diese Kamera sieht keinen Himmel" — das ist der Normalfall für Kameras, die '
+                    . 'nach unten blicken. Der Klarwert wird je Kamera und Sonnenhöhe selbst gelernt; '
+                    . 'nach dem Ziehen dauert es ein paar klare Stunden, bis er trägt.'],
             ]],
 
             ['type' => 'ExpansionPanel', 'caption' => 'Kameras (Sichtmessung)', 'expanded' => true, 'items' => [
