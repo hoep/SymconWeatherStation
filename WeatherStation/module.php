@@ -927,6 +927,7 @@ class WeatherStation extends IPSModule
                                    string $Feld = 'sicht'): string
     {
         $himmel = ($Feld === 'himmel');
+        $entfernt = $himmel && ($W < 5.0 || $H < 5.0);
         $cams = json_decode($this->ReadPropertyString('Cameras'), true);
         if (!is_array($cams)) {
             return json_encode(['ok' => false, 'fehler' => 'keine Kameraliste']);
@@ -977,9 +978,11 @@ class WeatherStation extends IPSModule
         }
         IPS_SetProperty($this->InstanceID, 'Cameras', json_encode(array_values($cams)));
         IPS_ApplyChanges($this->InstanceID);
-        return json_encode(['ok' => true, 'hinweis' => $himmel
-            ? 'Himmelsfeld gesetzt, gelernte Klarwerte dieser Kamera verworfen'
-            : 'Sichtfeld gesetzt, Klarwert dieser Kamera verworfen'], JSON_UNESCAPED_UNICODE);
+        return json_encode(['ok' => true, 'hinweis' => $entfernt
+            ? 'Himmelsfeld entfernt – diese Kamera zählt bei der Bewölkung nicht mehr mit'
+            : ($himmel ? 'Himmelsfeld gesetzt, gelernte Klarwerte dieser Kamera verworfen'
+                       : 'Sichtfeld gesetzt, Klarwert dieser Kamera verworfen')],
+            JSON_UNESCAPED_UNICODE);
     }
 
     /**
@@ -1470,10 +1473,10 @@ class WeatherStation extends IPSModule
      *     weniger; ohne Vergessen bliebe der Faktor auf dem Stand des Neuzustands stehen und
      *     die Anlage meldete jeden klaren Tag als leicht bewoelkt.
      */
-    private function strahlungFaktor(float $hoehe, ?float $rad, ?float $modell = null): float
+    private function strahlungFaktor(float $hoehe, ?float $rad, ?float $modell = null): ?float
     {
         if ($hoehe <= Meteo::STRAHLUNG_MIN_HOEHE) {
-            return 1.0;
+            return null;
         }
         $fach  = Meteo::strahlungFach($hoehe);
         $stand = $this->attrJson('SunBase');
@@ -1496,8 +1499,11 @@ class WeatherStation extends IPSModule
             $wert = max(self::LERN_MIN, min(self::LERN_MAX, $wert));
             $stand[$fach] = ['f' => round($wert, 4), 'ts' => time()];
             $this->attrJsonSchreiben('SunBase', $stand);
+            $e = $stand[$fach];
         }
-        return $wert;
+        // NULL heisst "fuer dieses Fach ist noch nichts gelernt" - und genau das muss die
+        // Auswertung wissen, statt eine 1,0 als Kennlinie zu behandeln, die sie nicht ist.
+        return $e === null ? null : $wert;
     }
 
     /**
