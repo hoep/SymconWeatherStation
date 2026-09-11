@@ -986,6 +986,38 @@ class WeatherStation extends IPSModule
     }
 
     /**
+     * Gelernten Himmels-Klarwert vorbelegen.
+     *
+     * Der Klarwert wird normalerweise SELBST gelernt - aber nur, wenn das Modell klaren
+     * Himmel belegt, und getrennt je Sonnenhoehenfach. Bei sechs Faechern kann es Wochen
+     * dauern, bis eine Kamera ueber den ganzen Tag mitredet: jedes Fach braucht seinen
+     * eigenen klaren Himmel.
+     *
+     * Vorbelegen heisst deshalb NICHT raten, sondern eine anderswo gemessene Zahl
+     * einsetzen - etwa aus einem aufgehobenen Bild desselben Ausschnitts bei belegt klarem
+     * Himmel. Der Lernvorgang bleibt daneben aktiv und korrigiert den Wert nach unten,
+     * sobald er einen blaueren Himmel sieht; nach oben nur durch das Verfallsdatum. Ein zu
+     * hoch angesetzter Wert meldet also voruebergehend ZU WENIG Bewoelkung, ein zu tiefer
+     * zu viel - beides heilt, aber der erste Fall heilt schneller.
+     */
+    public function HimmelKlarwertSetzen(int $MediaID, string $Fach, float $RB): string
+    {
+        if ($MediaID <= 0 || $RB <= 0.1 || $RB > 2.0) {
+            return json_encode(['ok' => false, 'fehler' => 'unbrauchbare Angaben']);
+        }
+        if (!preg_match('/^h[0-6]$/', $Fach)) {
+            return json_encode(['ok' => false, 'fehler' => 'Fach muss h0 bis h6 sein']);
+        }
+        $hb = $this->attrJson('SkyBase');
+        $hb[$MediaID . $Fach] = ['rb' => round($RB, 4), 'ts' => time(),
+                                 'n' => CameraVision::himmelSchwellen()['minLern']];
+        $this->attrJsonSchreiben('SkyBase', $hb);
+        return json_encode(['ok' => true, 'hinweis' => sprintf(
+            'Klarwert %.2f für Fach %s vorbelegt – wird durch echtes Lernen weiter nach unten korrigiert',
+            $RB, $Fach)], JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
      * Nimmt diese Kamera an der SICHTMESSUNG teil?
      *
      * Getrennt vom Aktiv-Schalter: "stillgelegt" heisst, die Kamera zaehlt nirgends mit,
