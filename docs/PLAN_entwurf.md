@@ -42,7 +42,7 @@ Ein Treiber je Stationstyp, registriert über die bestehende `DriverFactory`:
 - 192.168.1.50 ist ein **Raspberry Pi** mit Apache; die Anwendung dort stammt vom 11.12.2019.
   Er liest den Datenlogger und schreibt die Textdatei. Ein unbeaufsichtigter Zwischenschritt,
   von dem die gesamte Wetterauswertung des Hauses abhängt.
-- Der Client Socket „Davis" #<ID> auf **192.168.1.0:10001** (Seriell-über-Netz) ist
+- Der Client Socket „Davis" #<ID> auf **192.168.1.190:10001** (Seriell-über-Netz) ist
   geschlossen, Status 104 — Altlast. Die Gegenstelle **antwortet aber auf Ping**. Das ist der
   Weg zur Station selbst.
 - Die Zeitstempel in `actData.txt` sind **UTC**, nicht Ortszeit (geprüft: Datei meldet 08:53,
