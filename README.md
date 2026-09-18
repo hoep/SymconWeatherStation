@@ -140,6 +140,19 @@ libs/Weather/
 gegen Literaturwerte prüfen, ohne eine Anlage zu besitzen, und andere Module können sie
 direkt aufrufen, statt Variablen abzugreifen.
 
+
+## Installation
+
+Konsole → *Kern-Instanzen* → **Modules** → Hinzufuegen:
+
+```
+https://github.com/hoep/SymconWeatherStation
+```
+
+Voraussetzung ist IP-Symcon ab Kernel 7.1 und mindestens eine Wetterquelle -
+eine Davis- oder Tempest-Station im Netz oder eine der unterstuetzten
+Online-Quellen. Welche das sind, steht unter *Quellen*.
+
 ## Einrichtung
 
 1. Je Station eine **WeatherSource**-Instanz anlegen, Art wählen, Felder ausfüllen. Der
