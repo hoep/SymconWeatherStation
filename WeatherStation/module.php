@@ -329,14 +329,49 @@ class WeatherStation extends IPSModule
         if (time() - $this->ReadAttributeInteger('LastRun') < $gap) {
             return;
         }
-        $this->Update();
+
+        // HIER WIRD NICHT GERECHNET.
+        //
+        // MessageSink laeuft im Nachrichtenthread des Kernels: solange die Methode
+        // arbeitet, steht die Schlange fuer alle. Ein Lauf dauert 100-200 ms, wenn die
+        // Kameraauswertung faellig ist, und der Kernel meldete das brav als
+        // "Nachricht VM_UPDATE fuer ID <Davis: Zuletzt gelesen> dauerte 161 ms" - am
+        // 20.09.2026 einmal pro Minute, 31 Mal an einem Vormittag.
+        //
+        // Stattdessen wird nur der ohnehin vorhandene Tick-Timer vorgezogen; gerechnet
+        // wird dann im Timer-Thread.
+        //
+        // Am 20.09.2026 nachgemessen: vorher lief die Auswertung nahezu ununterbrochen
+        // (8 verschiedene Laufzeitpunkte in 40 s), nachher traegt der 60-s-Takt, und neue
+        // Quelldaten holen einen Lauf prompt vor - gemessene Abstaende 62, 62, 63, dann
+        // 16 und 7 Sekunden. Beide Wege leben also; die Dauerlast faellt weg.
+        $this->SetTimerInterval('Tick', 250);
     }
 
     // ==================================================================
     // Oeffentlich
     // ==================================================================
 
+    /**
+     * Oeffentlicher Einstieg - vom Tick-Timer, vom Formularknopf und von WX_Update().
+     *
+     * Setzt den Takt am Ende IMMER auf das eingestellte Intervall zurueck. Noetig, weil
+     * MessageSink den Timer auf 250 ms vorzieht; ohne Ruecksetzen liefe er so weiter.
+     * Das `finally` sorgt dafuer, dass auch ein Fehler mitten im Lauf keine 250-ms-
+     * Schleife hinterlaesst.
+     */
     public function Update(): void
+    {
+        try {
+            $this->berechnen();
+        } finally {
+            $iv = max(0, $this->ReadPropertyInteger('Interval'));
+            $this->SetTimerInterval('Tick', $iv * 1000);
+        }
+    }
+
+    /** Der eigentliche Lauf. Laeuft im Timer- oder Skriptthread, nie im Kernel-Thread. */
+    private function berechnen(): void
     {
         $this->WriteAttributeInteger('LastRun', time());
         [$o, $herkunft] = $this->zusammenfuehren();
