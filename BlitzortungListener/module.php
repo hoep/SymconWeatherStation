@@ -253,7 +253,6 @@ class BlitzortungListener extends IPSModule
         $r30 = array_filter($ring, static fn($x) => $jetzt - $x['t'] <= 1800);
         $r10 = array_filter($ring, static fn($x) => $jetzt - $x['t'] <= 600);
         $this->setIfChanged('Count30', count($r30));
-        $this->setIfChanged('Active', count($r30) > 0);
         if ($ring) {
             $this->setIfChanged('LastStrike', (int) end($ring)['t']);
         }
@@ -277,6 +276,9 @@ class BlitzortungListener extends IPSModule
         } else {
             $this->setIfChanged('BearingText', '–');
         }
+        // Erst NACH Entfernung und Richtung: wer auf das Umschalten reagiert (Lage-Protokoll),
+        // liest sonst noch die Werte des letzten Gewitters.
+        $this->setIfChanged('Active', count($r30) > 0);
         // Balken: sechs Fuenf-Minuten-Faecher, aeltestes links
         $faecher = [];
         for ($i = 6; $i >= 1; $i--) {
