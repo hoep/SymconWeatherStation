@@ -1,0 +1,27 @@
+{
+    "elements": [
+        { "type": "Label", "caption": "Amtliche Wetterwarnungen: Österreich über GeoSphere Austria (je Gemeinde), sonst über Meteoalarm (je Region)." },
+        { "type": "NumberSpinner", "name": "Latitude", "caption": "Breite (0 = Standort aus Symcon)", "digits": 6 },
+        { "type": "NumberSpinner", "name": "Longitude", "caption": "Länge", "digits": 6 },
+        { "type": "Select", "name": "Provider", "caption": "Quelle", "options": [
+            { "caption": "automatisch (Österreich: GeoSphere, sonst Meteoalarm)", "value": "auto" },
+            { "caption": "GeoSphere Austria", "value": "geosphere" },
+            { "caption": "Meteoalarm", "value": "meteoalarm" }
+        ] },
+        { "type": "ValidationTextBox", "name": "Region", "caption": "Meteoalarm-Region (EMMA_ID, z. B. IT006 Veneto, IT020 Friaul)" },
+        { "type": "NumberSpinner", "name": "IntervalMin", "caption": "Abruf alle", "suffix": "min", "minimum": 5 },
+        { "type": "SelectScript", "name": "NotifyScript", "caption": "Meldeskript (optional)" },
+        { "type": "Select", "name": "NotifyLevel", "caption": "Melden ab Stufe", "options": [
+            { "caption": "gelb", "value": 1 }, { "caption": "orange", "value": 2 }, { "caption": "rot", "value": 3 }
+        ] }
+    ],
+    "actions": [
+        { "type": "Button", "caption": "Jetzt abrufen", "onClick": "WXW_Update($id);" }
+    ],
+    "status": [
+        { "code": 102, "icon": "active", "caption": "Warnungen aktuell" },
+        { "code": 201, "icon": "error", "caption": "Kein Standort: Koordinaten eintragen oder Symcon-Standort setzen" },
+        { "code": 202, "icon": "error", "caption": "Abruf fehlgeschlagen, letzter Stand bleibt" },
+        { "code": 203, "icon": "error", "caption": "Meteoalarm-Region fehlt oder Land unbekannt" }
+    ]
+}

@@ -67,6 +67,24 @@ nach Geohash — ohne Konto.
 - **Last:** Empfang hängt jeden Blitz nur an einen Puffer, ausgewertet wird alle 10 Sekunden.
 - **Nutzung:** Blitzortung.org erlaubt die Daten für private, nicht kommerzielle Zwecke.
 
+## Amtliche Wetterwarnungen
+
+Das Modul **WeatherWarnings** holt Warnungen für einen Standort, je Land aus der passenden
+amtlichen Quelle, ohne Konto:
+
+- **Österreich:** GeoSphere Austria (vormals ZAMG), per Koordinate, je **Gemeinde**.
+- **Sonst:** Meteoalarm, der Verbund der europäischen Wetterdienste, je **Region** (EMMA_ID,
+  etwa IT006 Veneto). Mehrere Instanzen desselben Landes teilen sich einen Abruf.
+
+Stufen einheitlich gelb, orange, rot. GeoSphere warnt stundenweise; aufeinanderfolgende
+Warnungen gleicher Art und Stufe werden zu einer zusammengefasst. Variablen: Warnstufe jetzt,
+Warnung jetzt (Klartext), nächste Warnung ab, alle Warnungen als JSON. Optional läuft für jede
+neue Warnung ab einer Stufe einmal ein Meldeskript (Werte in `$_IPS`: WARN_ART, WARN_STUFE,
+WARN_STUFE_TEXT, WARN_VON, WARN_BIS, WARN_TEXT, STANDORT). Abgerufen wird im eigenen Timer.
+
+Grenze: Meteoalarm meldet nur ganze Regionen. Eine Sturmwarnung für die Alpen des Veneto gilt
+dort auch für die Küste.
+
 ## Was abgeleitet wird
 
 **Nebel** in zwei Stufen. Zuerst ein Regelsatz als Torwächter — Luftfeuchte ab 94 %, Wind bis

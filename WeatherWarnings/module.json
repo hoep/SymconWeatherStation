@@ -1,0 +1,13 @@
+{
+    "id": "{C4A1E7D2-9B36-4F58-8E0A-6D2F1B7C3A95}",
+    "name": "WeatherWarnings",
+    "type": 3,
+    "vendor": "Hoep",
+    "aliases": ["Wetterwarnungen", "WeatherWarnings", "Unwetterwarnung"],
+    "url": "https://github.com/hoep/SymconWeatherStation",
+    "prefix": "WXW",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "hidden": false
+}
