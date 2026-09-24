@@ -1,0 +1,13 @@
+{
+    "id": "{B7D2E4A9-3C15-4F6B-9A08-2E71C5D9F4B3}",
+    "name": "BlitzortungListener",
+    "type": 3,
+    "vendor": "Hoep",
+    "aliases": ["Blitzortung", "BlitzortungListener", "Lightning"],
+    "url": "https://github.com/hoep/SymconWeatherStation",
+    "prefix": "WXB",
+    "parentRequirements": ["{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}"],
+    "childRequirements": [],
+    "implemented": ["{7F7632D9-FA40-4F38-8DEA-C83CD4325A32}"],
+    "hidden": false
+}

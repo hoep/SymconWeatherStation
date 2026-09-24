@@ -49,6 +49,24 @@ Der Gewinn ist nicht die Unabhängigkeit, sondern die **Auflösung**:
 - **Wind im Drei-Sekunden-Takt** statt im Minutenmittel. Für Beschattung und Markisenschutz ist
   das der Unterschied zwischen rechtzeitig und zu spät.
 
+## Blitze mit Richtung: Blitzortung
+
+Die Tempest misst je Schlag nur die Entfernung, nicht die Richtung. Das Modul
+**BlitzortungListener** holt dazu die Blitze aus dem Netz von Blitzortung.org, das jeden Blitz
+aus den Laufzeiten vieler Stationen ortet. Ein Community-Dienst verteilt sie als MQTT, gegliedert
+nach Geohash — ohne Konto.
+
+- **Aufbau:** Client Socket (`blitzortung.ha.sed.pl`, Port 1883) → MQTT Client → BlitzortungListener.
+  Die Abos des MQTT Clients setzt das Modul selbst: nur die Geohash-Zellen, die den Kreis um den
+  Standort berühren (Radius einstellbar, Vorgabe 100 km). Der Weltstrom mit mehreren Blitzen je
+  Sekunde kommt so gar nicht erst an.
+- **Standort:** eigene Eigenschaften oder, wenn leer, die Location-Instanz von Symcon.
+- **Variablen:** nächster Blitz (km), Richtung (Grad und Text, Kreismittel gewichtet nach Nähe),
+  Blitze in 30 Minuten, letzter Blitz, Gewitter in der Nähe, dazu zwei JSON-Listen für Anzeigen:
+  Blitze je 5 Minuten und Blitze mit Richtung, Entfernung und Alter.
+- **Last:** Empfang hängt jeden Blitz nur an einen Puffer, ausgewertet wird alle 10 Sekunden.
+- **Nutzung:** Blitzortung.org erlaubt die Daten für private, nicht kommerzielle Zwecke.
+
 ## Was abgeleitet wird
 
 **Nebel** in zwei Stufen. Zuerst ein Regelsatz als Torwächter — Luftfeuchte ab 94 %, Wind bis
