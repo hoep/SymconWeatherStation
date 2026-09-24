@@ -68,8 +68,14 @@ class BlitzortungListener extends IPSModule
     /** Standort: eigene Eigenschaft, sonst die Location-Instanz von Symcon. */
     private function position(): array
     {
-        $lat = $this->ReadPropertyFloat('Latitude');
-        $lon = $this->ReadPropertyFloat('Longitude');
+        return self::positionOf($this->InstanceID);
+    }
+
+    /** Standort einer beliebigen Instanz dieses Moduls (auch der Geschwister am selben Client). */
+    private static function positionOf(int $id): array
+    {
+        $lat = (float) @IPS_GetProperty($id, 'Latitude');
+        $lon = (float) @IPS_GetProperty($id, 'Longitude');
         if ($lat != 0.0 || $lon != 0.0) {
             return [$lat, $lon];
         }
@@ -117,11 +123,16 @@ class BlitzortungListener extends IPSModule
      */
     private function topics(): array
     {
-        [$lat, $lon] = $this->position();
+        return self::topicsOf($this->InstanceID);
+    }
+
+    private static function topicsOf(int $id): array
+    {
+        [$lat, $lon] = self::positionOf($id);
         if ($lat == 0.0 && $lon == 0.0) {
             return [];
         }
-        $r = max(10, min(300, $this->ReadPropertyInteger('RadiusKm')));
+        $r = max(10, min(300, (int) @IPS_GetProperty($id, 'RadiusKm')));
         $dLat = $r / 111.0;
         $dLon = $r / (111.0 * max(0.2, cos(deg2rad($lat))));
         $zellen = [];
@@ -138,14 +149,30 @@ class BlitzortungListener extends IPSModule
         return $out;
     }
 
-    /** Abos des uebergeordneten MQTT Clients angleichen (nur wenn sie abweichen). */
+    /**
+     * Abos des uebergeordneten MQTT Clients angleichen (nur wenn sie abweichen). Mehrere
+     * Standorte teilen sich einen Client: die Abos sind die VEREINIGUNG aller Empfaenger
+     * dieses Moduls an ihm - sonst ueberschriebe jeder die Gebiete der anderen.
+     */
     private function syncParent(array $topics): void
     {
         $p = (int) (IPS_GetInstance($this->InstanceID)['ConnectionID'] ?? 0);
-        if ($p <= 0 || !$topics || IPS_GetInstance($p)['ModuleInfo']['ModuleID'] !== self::MQTT_CLIENT) {
+        if ($p <= 0 || IPS_GetInstance($p)['ModuleInfo']['ModuleID'] !== self::MQTT_CLIENT) {
             return;
         }
-        $soll = array_map(static fn($t) => ['Topic' => $t, 'QoS' => 0], $topics);
+        $alle = $topics;
+        $modul = IPS_GetInstance($this->InstanceID)['ModuleInfo']['ModuleID'];
+        foreach (IPS_GetInstanceListByModuleID($modul) as $g) {
+            if ($g !== $this->InstanceID && (int) IPS_GetInstance($g)['ConnectionID'] === $p) {
+                $alle = array_merge($alle, self::topicsOf($g));
+            }
+        }
+        $alle = array_values(array_unique($alle));
+        sort($alle);
+        if (!$alle) {
+            return;
+        }
+        $soll = array_map(static fn($t) => ['Topic' => $t, 'QoS' => 0], $alle);
         $ist = json_decode((string) @IPS_GetProperty($p, 'Subscriptions'), true);
         if ($ist == $soll) {
             return;
